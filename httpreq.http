@@ -1,0 +1,26 @@
+POST https://api.z.ai/api/paas/v4/chat/completions HTTP/1.1
+Content-Type: application/json
+Authorization: Bearer не надо сюда смотреть
+
+{
+    "model": "glm-4.5-flash",
+    "messages": [
+    {
+    "role": "user",
+    "content": "As a marketing expert, please create an attractive slogan for my product."
+    },
+    {
+    "role": "assistant",
+    "content": "Sure, to craft a compelling slogan, please tell me more about your product."
+    },
+    {
+    "role": "user",
+    "content": "Z.AI Open Platform"
+    }
+    ],
+    "thinking": {
+    "type": "enabled"
+    },
+    "max_tokens": 1024,
+    "temperature": 1.0
+}
