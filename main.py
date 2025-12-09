@@ -1,24 +1,53 @@
-from zai import ZaiClient
+from openai import OpenAI
 import os
-import json
 from dotenv import load_dotenv
+from datetime import datetime
+import httpx
 
 load_dotenv()
 
 SYSTEM_PROMPT = "Ты помощник, который помогает с любыми вопросами"
 
 def main():
-    client = ZaiClient(api_key=os.getenv("ZAI_API_KEY"))
+    # Initialize OpenAI client
+    # You can use either OpenAI API or an OpenAI-compatible service
+
+    # Z.AI
+    # api_key = os.getenv("OPENAI_API_KEY")
+    # base_url = os.getenv("OPENAI_BASE_URL")
+    # model_name = "glm-4.6"
+
+
+    # Google Gemini
+    # api_key = os.getenv("OPENAI_API_KEY_GOOGLE")
+    # base_url = os.getenv("OPENAI_BASE_URL_GOOGLE")
+    # model_name = "gemini-2.5-flash"
+
+
+    # # Local OpenAI-compatible service (Qwen, Glm, gamma ...)
+    api_key = os.getenv("OPENAI_API_KEY_LOCAL")
+    base_url = os.getenv("OPENAI_BASE_URL_LOCAL")
+    model_name = "gemma3:27b"
+
+    # Disable SSL certificate verification
+    http_client = httpx.Client(verify=False)
+
+    if base_url:
+        client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
+    else:
+        client = OpenAI(api_key=api_key, http_client=http_client)
 
     print("=" * 50)
-    print("Консольный клиент GLM-4.5-flash. Введите 'quit' для выхода.")
+    print("Консольный клиент OpenAI-совместимой модели. Введите 'quit' для выхода.")
     print("=" * 50)
 
     conversation = [
         {"role": "system", "content": f"{SYSTEM_PROMPT}"}
     ]
 
-    temp= 1.0
+    temp = 1.0
+    print(f"Используемая модель: {model_name}")
+
     while True:
         # Получение запроса от пользователя
         try:
@@ -50,16 +79,17 @@ def main():
         # Добавление запроса в историю диалога
         conversation.append({"role": "user", "content": user_input})
 
-        temp = 1.8
         try:
+            # Record start time for request
+            start_time = datetime.now()
+
             # Отправка запроса к модели
             response = client.chat.completions.create(
-                model="GLM-4.6",  # Используемая модель
+                model=model_name,  # Используемая модель
                 messages=conversation,  # История разговора
                 temperature=temp,
                 max_tokens=2048,
-                thinking={ "type": "disabled" }
-                #response_format={"type": "json_object"} # Вроде удалось и без этой штуки добится нужного формата, но с ней надежнее
+                # Note: The thinking parameter from GLM is removed as it's not compatible with OpenAI interface
             )
 
             # Получение и вывод ответа
@@ -67,9 +97,28 @@ def main():
 
             conversation.append({"role": "assistant", "content": ai_response})
 
-            # First print the raw AI response
+            # Calculate request time
+            end_time = datetime.now()
+            request_duration = end_time - start_time
+
+            # Get token usage information
+            usage_info = response.usage
+            tokens_prompt = usage_info.prompt_tokens if hasattr(usage_info, 'prompt_tokens') else "N/A"
+            tokens_completion = usage_info.completion_tokens if hasattr(usage_info, 'completion_tokens') else "N/A"
+            tokens_total = usage_info.total_tokens if hasattr(usage_info, 'total_tokens') else "N/A"
+
+            # Print the raw AI response and additional information
             print(f"\nTemperature: {temp}")
             print(f"\nAI: {ai_response}")
+
+            # Print request time and token usage
+            print(f"\n--- Справочная информация ---")
+            print(f"Время запроса: {request_duration.total_seconds():.2f} секунд")
+            print(f"Расход токенов:")
+            print(f"  - Вопрос: {tokens_prompt}")
+            print(f"  - Ответ: {tokens_completion}")
+            print(f"  - Всего: {tokens_total}")
+            print(f"-----------------------------")
 
         except Exception as e:
             print(f"\n Произошла ошибка: {e}")
