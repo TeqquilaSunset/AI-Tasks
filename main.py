@@ -3,10 +3,81 @@ import os
 from dotenv import load_dotenv
 from datetime import datetime
 import httpx
+import json
+import glob
+from typing import List, Dict
+import re
 
 load_dotenv()
 
 SYSTEM_PROMPT = "Ты помощник, который помогает с любыми вопросами"
+
+def save_conversation(conversation_history: List[Dict], filename: str = None):
+    """Save the current conversation history to a JSON file"""
+    if not os.path.exists("saves"):
+        os.makedirs("saves")
+
+    if filename is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"saves/conversation_{timestamp}.json"
+    else:
+        if not filename.endswith('.json'):
+            filename = f"saves/{filename}.json"
+        else:
+            filename = f"saves/{filename}"
+
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(conversation_history, f, indent=2, ensure_ascii=False)
+        return filename
+    except Exception as e:
+        return f"Ошибка при сохранении: {e}"
+
+def list_saved_conversations():
+    """List all saved conversations with their IDs"""
+    save_files = glob.glob("saves/conversation_*.json")
+    save_files.sort(reverse=True)  # Most recent first
+
+    if not save_files:
+        return "Нет сохраненных разговоров."
+
+    result = "Список сохраненных разговоров:\n"
+    result += "="*40 + "\n"
+
+    for i, file in enumerate(save_files):
+        # Extract timestamp from filename
+        match = re.search(r'conversation_(\d{8}_\d{6})', file)
+        if match:
+            timestamp = match.group(1)
+            # Format timestamp nicely
+            formatted_time = f"{timestamp[0:4]}-{timestamp[4:6]}-{timestamp[6:8]} {timestamp[9:11]}:{timestamp[11:13]}:{timestamp[13:15]}"
+        else:
+            formatted_time = os.path.basename(file)
+
+        result += f"{i+1}. [{i+1}] {formatted_time} - {os.path.basename(file)}\n"
+
+    return result
+
+def load_conversation(save_id: str):
+    """Load a conversation from a saved file by ID"""
+    save_files = glob.glob("saves/conversation_*.json")
+    save_files.sort(reverse=True)  # Most recent first
+
+    try:
+        # Convert save_id to integer index
+        index = int(save_id) - 1
+
+        if 0 <= index < len(save_files):
+            filename = save_files[index]
+            with open(filename, 'r', encoding='utf-8') as f:
+                conversation = json.load(f)
+            return conversation, filename
+        else:
+            return None, "Неверный ID сохранения."
+    except ValueError:
+        return None, "ID сохранения должен быть числом."
+    except Exception as e:
+        return None, f"Ошибка при загрузке: {e}"
 
 def create_summary_with_llm(client, model_name, conversation_history):
     """Create a summary of all previous user requests and AI responses using LLM"""
@@ -124,6 +195,36 @@ def main():
             system_message = conversation[0]  # Keep the system prompt
             summary_message = f"Суммаризация предыдущего разговора: {summary}"
             conversation = [system_message, {"role": "assistant", "content": summary_message}]
+            continue  # Skip to the next iteration without sending to AI
+
+        # Check if the user wants to save the conversation
+        if user_input.lower() == 'save':
+            filename = save_conversation(conversation)
+            if filename.startswith("Ошибка"):
+                print(f"\n{filename}")
+            else:
+                print(f"\nИстория разговора сохранена в {filename}")
+            continue  # Skip to the next iteration without sending to AI
+
+        # Check if the user wants to list saved conversations
+        if user_input.lower() == 'load':
+            saved_list = list_saved_conversations()
+            print(f"\n{saved_list}")
+            continue  # Skip to the next iteration without sending to AI
+
+        # Check if the user wants to load a specific conversation (format: "load id")
+        if user_input.lower().startswith('load '):
+            parts = user_input.split()
+            if len(parts) == 2:
+                save_id = parts[1]
+                loaded_conversation, result = load_conversation(save_id)
+                if loaded_conversation is not None:
+                    conversation = loaded_conversation  # Replace current conversation
+                    print(f"\nИстория разговора загружена из {result}")
+                else:
+                    print(f"\n{result}")
+            else:
+                print("\nПожалуйста, укажите ID сохранения. Пример: load 1")
             continue  # Skip to the next iteration without sending to AI
 
         # Добавление запроса в историю диалога
