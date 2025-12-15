@@ -1,0 +1,2 @@
+# No external dependencies needed - using only Python standard library
+# datetime, random, json, http.server, urllib.parse are all part of stdlib
