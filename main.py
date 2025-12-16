@@ -1,278 +1,446 @@
-from openai import OpenAI
-import os
-from dotenv import load_dotenv
-from datetime import datetime
-import httpx
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+OpenAI-совместимый чат-клиент с MCP-инструментами
+(современный подход с FastMCP и улучшенной архитектурой)
+"""
+from __future__ import annotations
+
+import asyncio
 import json
-import glob
-from typing import List, Dict
-import re
+import os
+import sys
+import typing as tp
+from contextlib import AsyncExitStack
+from datetime import datetime
+from pathlib import Path
+
+import httpx
+import openai
+from dotenv import load_dotenv
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 load_dotenv()
 
-SYSTEM_PROMPT = "Ты помощник, который помогает с любыми вопросами"
+# --------------------  КОНФИГУРАЦИЯ  --------------------
+SYSTEM_PROMPT = "Ты помощник, который помогает с любыми вопросами. Ты можешь использовать доступные инструменты для получения информации."
+SAVE_DIR = Path("saves")
+SAVE_DIR.mkdir(exist_ok=True)
 
-def save_conversation(conversation_history: List[Dict], filename: str = None):
-    """Save the current conversation history to a JSON file"""
-    if not os.path.exists("saves"):
-        os.makedirs("saves")
+BASE_DIR = Path(__file__).resolve().parent
+SERVER_SCRIPT = str(BASE_DIR / "mcp_server.py")
 
-    if filename is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"saves/conversation_{timestamp}.json"
-    else:
-        if not filename.endswith('.json'):
-            filename = f"saves/{filename}.json"
-        else:
-            filename = f"saves/{filename}"
+# --------------------  ЛОГИРОВАНИЕ  --------------------
+import logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s - %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stderr)]
+)
+log = logging.getLogger("mcp-client")
 
+# --------------------  УТИИЛИТЫ  --------------------
+def build_openai_client() -> openai.AsyncOpenAI:
+    """Создает клиент OpenAI с настройками из окружения."""
+    key = os.getenv("OPENAI_API_KEY")
+    base = os.getenv("OPENAI_BASE_URL")
+    verify = os.getenv("OPENAI_VERIFY_SSL", "true").lower() != "false"
+    http = httpx.AsyncClient(verify=verify)
+    return openai.AsyncOpenAI(api_key=key, base_url=base, http_client=http)
+
+def save_conversation(history: tp.List[dict], name: str | None = None) -> str:
+    """Сохраняет историю разговора в JSON файл."""
+    name = f"conversation_{datetime.now():%Y%m%d_%H%M%S}.json" if name is None else name
+    if not name.endswith(".json"):
+        name += ".json"
+    
+    path = SAVE_DIR / name
     try:
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(conversation_history, f, indent=2, ensure_ascii=False)
-        return filename
-    except Exception as e:
-        return f"Ошибка при сохранении: {e}"
+        path.write_text(json.dumps(history, ensure_ascii=False, indent=2))
+        log.info(f"Разговор сохранен в {path}")
+        return str(path)
+    except Exception as exc:
+        error_msg = f"Ошибка при сохранении: {exc}"
+        log.error(error_msg)
+        return error_msg
 
-def list_saved_conversations():
-    """List all saved conversations with their IDs"""
-    save_files = glob.glob("saves/conversation_*.json")
-    save_files.sort(reverse=True)  # Most recent first
-
-    if not save_files:
-        return "Нет сохраненных разговоров."
-
-    result = "Список сохраненных разговоров:\n"
-    result += "="*40 + "\n"
-
-    for i, file in enumerate(save_files):
-        # Extract timestamp from filename
-        match = re.search(r'conversation_(\d{8}_\d{6})', file)
-        if match:
-            timestamp = match.group(1)
-            # Format timestamp nicely
-            formatted_time = f"{timestamp[0:4]}-{timestamp[4:6]}-{timestamp[6:8]} {timestamp[9:11]}:{timestamp[11:13]}:{timestamp[13:15]}"
-        else:
-            formatted_time = os.path.basename(file)
-
-        result += f"{i+1}. [{i+1}] {formatted_time} - {os.path.basename(file)}\n"
-
-    return result
-
-def load_conversation(save_id: str):
-    """Load a conversation from a saved file by ID"""
-    save_files = glob.glob("saves/conversation_*.json")
-    save_files.sort(reverse=True)  # Most recent first
-
+def load_conversation(name: str) -> tp.Tuple[tp.List[dict] | None, str]:
+    """Загружает историю разговора из файла."""
     try:
-        # Convert save_id to integer index
-        index = int(save_id) - 1
+        if name.isdigit():
+            # Загрузка по номеру
+            files = sorted(SAVE_DIR.glob("conversation_*.json"), reverse=True)
+            idx = int(name) - 1
+            if 0 <= idx < len(files):
+                path = files[idx]
+                return json.loads(path.read_text()), str(path)
+            return None, "Неверный номер сохранения."
+        
+        # Загрузка по имени
+        path = SAVE_DIR / (name if name.endswith(".json") else f"{name}.json")
+        if path.exists():
+            return json.loads(path.read_text()), str(path)
+        return None, f"Файл {path} не найден."
+        
+    except Exception as exc:
+        error_msg = f"Ошибка при загрузке: {exc}"
+        log.error(error_msg)
+        return None, error_msg
 
-        if 0 <= index < len(save_files):
-            filename = save_files[index]
-            with open(filename, 'r', encoding='utf-8') as f:
-                conversation = json.load(f)
-            return conversation, filename
-        else:
-            return None, "Неверный ID сохранения."
-    except ValueError:
-        return None, "ID сохранения должен быть числом."
-    except Exception as e:
-        return None, f"Ошибка при загрузке: {e}"
+def list_saved_conversations() -> str:
+    """Возвращает список сохраненных разговоров."""
+    files = sorted(SAVE_DIR.glob("conversation_*.json"), reverse=True)
+    if not files:
+        return "Нет сохранённых разговоров."
+    
+    lines = ["Сохранённые разговоры:", "=" * 40]
+    for idx, fp in enumerate(files, 1):
+        # Извлекаем дату из имени файла
+        ts_match = fp.stem.replace("conversation_", "")
+        try:
+            dt = datetime.strptime(ts_match, "%Y%m%d_%H%M%S")
+            nice_date = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except:
+            nice_date = fp.stem
+        
+        lines.append(f"{idx}. {nice_date} – {fp.name}")
+    
+    return "\n".join(lines)
 
-def create_summary_with_llm(client, model_name, conversation_history):
-    """Create a summary of all previous user requests and AI responses using LLM"""
-    # Exclude the system prompt (index 0) and only include user and assistant messages
-    user_ai_messages = [msg for msg in conversation_history[1:] if msg["role"] in ["user", "assistant"]]
-
-    if len(user_ai_messages) == 0:
-        return "Нет истории диалога для создания резюме."
-
-    # Format the conversation history for the LLM to summarize
-    formatted_history = "Пожалуйста, создай краткое резюме следующей истории диалога. Выдели основные темы и детали диалога, которые могут понадобится при дальнейшем общении:\n\n"
-    for i, message in enumerate(user_ai_messages):
-        role = "Пользователь" if message["role"] == "user" else "AI"
-        content = message["content"]
-        formatted_history += f"{role}: {content}\n\n"
-
+async def create_summary(cli: openai.AsyncOpenAI, model: str, history: tp.List[dict]) -> str:
+    """Создает краткое резюме разговора."""
+    msgs = [m for m in history if m["role"] in ("user", "assistant")]
+    if not msgs:
+        return "Нет истории для резюме."
+    
+    text = "Пожалуйста, создай краткое резюме следующего диалога. Выдели основные темы и детали:\n\n"
+    for msg in msgs:
+        role = "Пользователь" if msg["role"] == "user" else "AI"
+        text += f"{role}: {msg['content']}\n\n"
+    
     try:
-        # Send the formatted history to the LLM for summarization
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[{"role": "user", "content": formatted_history}],
+        resp = await cli.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": text}],
             temperature=0.3,
-            max_tokens=2048
+            max_tokens=512,
         )
+        return resp.choices[0].message.content or "Не удалось создать резюме."
+    except Exception as exc:
+        error_msg = f"Ошибка при создании резюме: {exc}"
+        log.error(error_msg)
+        return error_msg
 
-        summary = response.choices[0].message.content
-        return summary
-    except Exception as e:
-        return f"Ошибка при создании резюме: {e}"
+# --------------------  MCP КЛИЕНТ  --------------------
+class MCPClient:
+    """Современный MCP клиент с улучшенным управлением ресурсами."""
+    
+    def __init__(self) -> None:
+        self.session: ClientSession | None = None
+        self.exit_stack = AsyncExitStack()
+        self.tools: list[dict] = []
+        self._running = False
 
-def print_context(system_prompt, conversation_history):
-    """Print the full context (system prompt + conversation history)"""
-    print("="*50)
-    print("ПОЛНЫЙ КОНТЕКСТ:")
-    print("="*50)
-    print(f"Системный промпт: {system_prompt}")
-    print("-"*50)
-    print("История разговора:")
+    async def connect_to_server(self, server_script_path: str) -> None:
+        """Подключается к MCP серверу."""
+        log.info(f"Подключение к серверу: {server_script_path}")
+        
+        if not Path(server_script_path).exists():
+            raise FileNotFoundError(f"Сервер не найден: {server_script_path}")
+        
+        # Параметры для запуска сервера
+        server_params = StdioServerParameters(
+            command=sys.executable,
+            args=[server_script_path],
+            env={**os.environ}
+        )
+        
+        # Создаем транспорт и сессию через контекстный менеджер
+        stdio_transport = await self.exit_stack.enter_async_context(
+            stdio_client(server_params)
+        )
+        
+        self.session = await self.exit_stack.enter_async_context(
+            ClientSession(
+                stdio_transport[0], 
+                stdio_transport[1],
+                client_info={"name": "mcp-client", "version": "1.0.0"}
+            )
+        )
+        
+        # Инициализируем сессию
+        await self.session.initialize()
+        
+        # Получаем список инструментов
+        tools_result = await self.session.list_tools()
+        self.tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "parameters": tool.inputSchema
+                }
+            }
+            for tool in (tools_result.tools if tools_result else [])
+        ]
+        
+        self._running = True
+        log.info(f"Подключено к серверу. Доступно инструментов: {len(self.tools)}")
+        
+        if self.tools:
+            for tool in self.tools:
+                log.info(f"  - {tool['function']['name']}: {tool['function']['description']}")
 
-    for i, message in enumerate(conversation_history[1:], 1):  # Skip system prompt
-        role = message["role"].upper()
-        content = message["content"]
-        print(f"{i}. {role}: {content}")
+    async def call_tool(self, name: str, arguments: dict) -> str:
+        """Вызывает инструмент MCP сервера."""
+        if not self._running or not self.session:
+            return "[Ошибка] Сервер не подключен"
+        
+        try:
+            result = await self.session.call_tool(name, arguments)
+            
+            # Объединяем все текстовые блоки в один ответ
+            text_parts = []
+            for block in result.content or []:
+                if hasattr(block, 'text'):
+                    text_parts.append(block.text)
+            
+            return "\n".join(text_parts) if text_parts else "Инструмент выполнен без результата"
+            
+        except Exception as exc:
+            error_msg = f"Ошибка вызова инструмента {name}: {exc}"
+            log.error(error_msg)
+            return f"[Ошибка] {error_msg}"
 
-    print("="*50)
+    async def cleanup(self) -> None:
+        """Освобождает ресурсы."""
+        if self._running:
+            self._running = False
+            await self.exit_stack.aclose()
+            log.info("Ресурсы MCP клиента освобождены")
 
-def main():
-    # Initialize OpenAI client
-    # You can use either OpenAI API or an OpenAI-compatible service
+    @property
+    def available_tools(self) -> list[dict]:
+        """Возвращает список доступных инструментов."""
+        return self.tools
 
-    # Z.AI
-    api_key = os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL")
-    model_name = "glm-4.5-air"
+# --------------------  ЧАТ КЛИЕНТ  --------------------
+class ChatClient:
+    """Основной чат-клиент с интеграцией MCP."""
+    
+    def __init__(self, model_name: str = "glm-4.5-air") -> None:
+        self.model_name = model_name
+        self.openai_client = build_openai_client()
+        self.mcp_client = MCPClient()
+        self.conversation: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.temperature = 0.7
 
-    # Disable SSL certificate verification
-    http_client = httpx.Client(verify=False)
+    async def process_query(self, query: str) -> str:
+        """Обрабатывает запрос пользователя с использованием доступных инструментов."""
+        log.info(f"Обработка запроса: {query[:50]}...")
+        
+        try:
+            # Делаем запрос к OpenAI с доступными инструментами
+            response = await self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=self.conversation + [{"role": "user", "content": query}],
+                tools=self.mcp_client.available_tools or None,
+                tool_choice="auto" if self.mcp_client.available_tools else None,
+                temperature=self.temperature,
+                max_tokens=2048,
+            )
+            
+            assistant_message = response.choices[0].message
+            content = assistant_message.content or ""
+            
+            # Проверяем, есть ли tool calls
+            if assistant_message.tool_calls:
+                log.info(f"Обнаружены вызовы инструментов: {[tc.function.name for tc in assistant_message.tool_calls]}")
+                
+                # Добавляем сообщение ассистента
+                self.conversation.append({
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments
+                            }
+                        }
+                        for tc in assistant_message.tool_calls
+                    ]
+                })
+                
+                # Выполняем все tool calls
+                for tool_call in assistant_message.tool_calls:
+                    tool_name = tool_call.function.name
+                    tool_args = json.loads(tool_call.function.arguments)
+                    
+                    log.info(f"Вызов инструмента: {tool_name} с аргументами: {tool_args}")
+                    
+                    # Вызываем инструмент MCP
+                    tool_result = await self.mcp_client.call_tool(tool_name, tool_args)
+                    
+                    log.info(f"Результат инструмента {tool_name}: {tool_result[:100]}...")
+                    
+                    # Добавляем результат в контекст
+                    self.conversation.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": tool_result
+                    })
+                
+                # Получаем финальный ответ
+                final_response = await self.openai_client.chat.completions.create(
+                    model=self.model_name,
+                    messages=self.conversation,
+                    temperature=self.temperature,
+                    max_tokens=2048,
+                )
+                
+                content = final_response.choices[0].message.content or ""
+            
+            return content
+            
+        except Exception as exc:
+            error_msg = f"Ошибка при обработке запроса: {exc}"
+            log.error(error_msg)
+            return f"Извините, произошла ошибка: {exc}"
 
-    if base_url:
-        client = OpenAI(api_key=api_key, base_url=base_url, http_client=http_client)
-    else:
-        client = OpenAI(api_key=api_key, http_client=http_client)
+    async def start(self, server_script: str) -> None:
+        """Запускает клиента и подключается к MCP серверу."""
+        log.info("Запуск чат-клиента...")
+        
+        # Подключаемся к MCP серверу
+        await self.mcp_client.connect_to_server(server_script)
+        
+        log.info("Чат-клиент готов к работе!")
 
-    print("=" * 50)
-    print("Консольный клиент OpenAI-совместимой модели. Введите 'quit' для выхода.")
-    print("=" * 50)
+    async def cleanup(self) -> None:
+        """Освобождает ресурсы."""
+        await self.mcp_client.cleanup()
+        await self.openai_client.close()
+        log.info("Клиент остановлен")
 
-    conversation = [
-        {"role": "system", "content": f"{SYSTEM_PROMPT}"}
-    ]
+    def add_message(self, role: str, content: str) -> None:
+        """Добавляет сообщение в историю."""
+        self.conversation.append({"role": role, "content": content})
 
-    temp = 1.0
-    print(f"Используемая модель: {model_name}")
+# --------------------  ИНТЕРАКТИВНЫЙ ИНТЕРФЕЙС  --------------------
+async def interactive_chat(client: ChatClient) -> None:
+    """Интерактивный чат-цикл."""
+    print("=" * 60)
+    print("🤖 Чат-клиент с MCP инструментами")
+    print("Команды: quit/exit, save <имя>, load <имя>, temp <0-2>, clear, print")
+    print("=" * 60)
 
     while True:
-        # Получение запроса от пользователя
         try:
-            user_input = input("\nВы: ")
+            user_input = input("\n👤 Вы: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n\nВыход.")
+            print("\n\n👋 До свидания!")
             break
 
-        if user_input.lower() == 'quit':
-            print("До свидания!")
+        if not user_input:
+            continue
+
+        # Обработка команд
+        if user_input.lower() in ("quit", "exit"):
+            print("👋 До свидания!")
             break
 
-        # Check if the user wants to change the temperature
-        if user_input.lower().startswith('temp '):
+        if user_input.lower() == "clear":
+            client.conversation = [{"role": "system", "content": SYSTEM_PROMPT}]
+            print("🗑️ История очищена")
+            continue
+
+        if user_input.lower() == "print":
+            print("=" * 50, "📋 История разговора:", "=" * 50, sep="\n")
+            for i, msg in enumerate(client.conversation[1:], 1):
+                print(f"{i}. {msg['role'].upper()}: {msg['content'][:100]}{'...' if len(msg['content']) > 100 else ''}")
+            print("=" * 50)
+            continue
+
+        if user_input.lower().startswith("save "):
+            name = user_input[5:].strip()
+            path = save_conversation(client.conversation, name)
+            print(f"💾 Сохранено: {path}")
+            continue
+
+        if user_input.lower().startswith("load "):
+            name = user_input[5:].strip()
+            loaded, msg = load_conversation(name)
+            if loaded:
+                client.conversation = loaded
+                print(f"📂 Загружено: {msg}")
+            else:
+                print(f"❌ {msg}")
+            continue
+
+        if user_input.lower().startswith("temp "):
             try:
-                # Extract the numeric value after 'temp '
-                temp_value = float(user_input[5:].strip())  # Skip 'temp ' (5 characters) and get the number
-                if 0.0 <= temp_value <= 2.0:  # Validate temperature range
-                    temp = temp_value
-                    print(f"Температура установлена на {temp}")
-                    continue  # Skip to the next iteration without sending to AI
+                temp = float(user_input[5:].strip())
+                if 0.0 <= temp <= 2.0:
+                    client.temperature = temp
+                    print(f"🌡️ Температура установлена: {temp}")
                 else:
-                    print("Температура должна быть в диапазоне от 0.0 до 2.0")
-                    continue
+                    print("⚠️ Температура должна быть от 0 до 2")
             except ValueError:
-                print("Пожалуйста, укажите числовое значение для температуры, например: temp 0.7")
-                continue
+                print("⚠️ Пример: temp 0.7")
+            continue
 
-        # Check if the user wants to print the full context
-        if user_input.lower() == 'print':
-            print_context(SYSTEM_PROMPT, conversation)
-            continue  # Skip to the next iteration without sending to AI
-
-        # Check if the user wants to get a summary of previous requests
-        if user_input.lower() == 'summary':
-            print("Создание резюме предыдущей истории...")
-            summary = create_summary_with_llm(client, model_name, conversation)
-            print(f"\nРезюме: {summary}")
-
-            # Replace conversation history with system prompt and summary only
-            system_message = conversation[0]  # Keep the system prompt
-            summary_message = f"Суммаризация предыдущего разговора: {summary}"
-            conversation = [system_message, {"role": "assistant", "content": summary_message}]
-            continue  # Skip to the next iteration without sending to AI
-
-        # Check if the user wants to save the conversation
-        if user_input.lower() == 'save':
-            filename = save_conversation(conversation)
-            if filename.startswith("Ошибка"):
-                print(f"\n{filename}")
-            else:
-                print(f"\nИстория разговора сохранена в {filename}")
-            continue  # Skip to the next iteration without sending to AI
-
-        # Check if the user wants to list saved conversations
-        if user_input.lower() == 'load':
-            saved_list = list_saved_conversations()
-            print(f"\n{saved_list}")
-            continue  # Skip to the next iteration without sending to AI
-
-        # Check if the user wants to load a specific conversation (format: "load id")
-        if user_input.lower().startswith('load '):
-            parts = user_input.split()
-            if len(parts) == 2:
-                save_id = parts[1]
-                loaded_conversation, result = load_conversation(save_id)
-                if loaded_conversation is not None:
-                    conversation = loaded_conversation  # Replace current conversation
-                    print(f"\nИстория разговора загружена из {result}")
-                else:
-                    print(f"\n{result}")
-            else:
-                print("\nПожалуйста, укажите ID сохранения. Пример: load 1")
-            continue  # Skip to the next iteration without sending to AI
-
-        # Добавление запроса в историю диалога
-        conversation.append({"role": "user", "content": user_input})
-
+        # Обработка обычного запроса
         try:
-            # Record start time for request
             start_time = datetime.now()
+            
+            # Добавляем сообщение пользователя
+            client.add_message("user", user_input)
+            
+            # Обрабатываем запрос
+            response = await client.process_query(user_input)
+            
+            # Добавляем ответ ассистента
+            client.add_message("assistant", response)
+            
+            # Выводим ответ
+            print(f"\n🤖 Ассистент: {response}")
+            
+            # Статистика
+            elapsed = (datetime.now() - start_time).total_seconds()
+            print(f"⏱️ Время: {elapsed:.2f}с | Инструментов: {len(client.mcp_client.available_tools)}")
+            
+        except Exception as exc:
+            error_msg = f"❌ Ошибка: {exc}"
+            log.error(error_msg)
+            print(error_msg)
 
-            # Отправка запроса к модели
-            response = client.chat.completions.create(
-                model=model_name,  # Используемая модель
-                messages=conversation,  # История разговора
-                temperature=temp,
-                max_tokens=2048,
-                # Note: The thinking parameter from GLM is removed as it's not compatible with OpenAI interface
-            )
-
-            # Получение и вывод ответа
-            ai_response = response.choices[0].message.content
-
-            conversation.append({"role": "assistant", "content": ai_response})
-
-            # Calculate request time
-            end_time = datetime.now()
-            request_duration = end_time - start_time
-
-            # Get token usage information
-            usage_info = response.usage
-            tokens_prompt = usage_info.prompt_tokens if hasattr(usage_info, 'prompt_tokens') else "N/A"
-            tokens_completion = usage_info.completion_tokens if hasattr(usage_info, 'completion_tokens') else "N/A"
-            tokens_total = usage_info.total_tokens if hasattr(usage_info, 'total_tokens') else "N/A"
-
-            # Print the raw AI response and additional information
-            print(f"\nTemperature: {temp}")
-            print(f"\nAI: {ai_response}")
-
-            # Print request time and token usage
-            print(f"\n--- Справочная информация ---")
-            print(f"Время запроса: {request_duration.total_seconds():.2f} секунд")
-            print(f"Расход токенов:")
-            print(f"  - Вопрос: {tokens_prompt}")
-            print(f"  - Ответ: {tokens_completion}")
-            print(f"  - Всего: {tokens_total}")
-            print(f"-----------------------------")
-
-        except Exception as e:
-            print(f"\n Произошла ошибка: {e}")
+# --------------------  ГЛАВНАЯ ФУНКЦИЯ  --------------------
+async def main() -> None:
+    """Главная функция запуска."""
+    # Создаем клиента
+    client = ChatClient(model_name="glm-4.5-air")
+    
+    try:
+        # Подключаемся к MCP серверу
+        await client.start(SERVER_SCRIPT)
+        
+        # Запускаем интерактивный чат
+        await interactive_chat(client)
+        
+    except KeyboardInterrupt:
+        print("\n\n🛑 Прервано пользователем")
+    except Exception as exc:
+        error_msg = f"💥 Критическая ошибка: {exc}"
+        log.exception(error_msg)
+        print(error_msg)
+    finally:
+        # Освобождаем ресурсы
+        await client.cleanup()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

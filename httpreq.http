@@ -24,3 +24,6 @@ Authorization: 43e13e521e434ab691b0487abab934bf.b8QtdHyIimzVtlTj
     "max_tokens": 1024,
     "temperature": 1.0
 }
+
+###
+GET http://api.openweathermap.org/data/2.5/weather?q=Moscow&appid=b52d0750fb10146367ad7a8a141703db HTTP/1.1
