@@ -21,6 +21,11 @@ from dotenv import load_dotenv
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+# Дополнительные импорты для RAG
+import requests
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import PointStruct, VectorParams, Distance
+
 load_dotenv()
 
 # --------------------  КОНФИГУРАЦИЯ  --------------------
@@ -116,12 +121,12 @@ async def create_summary(cli: openai.AsyncOpenAI, model: str, history: tp.List[d
     msgs = [m for m in history if m["role"] in ("user", "assistant")]
     if not msgs:
         return "Нет истории для резюме."
-    
+
     text = "Пожалуйста, создай краткое резюме следующего диалога. Выдели основные темы и детали:\n\n"
     for msg in msgs:
         role = "Пользователь" if msg["role"] == "user" else "AI"
         text += f"{role}: {msg['content']}\n\n"
-    
+
     try:
         resp = await cli.chat.completions.create(
             model=model,
@@ -134,6 +139,130 @@ async def create_summary(cli: openai.AsyncOpenAI, model: str, history: tp.List[d
         error_msg = f"Ошибка при создании резюме: {exc}"
         log.error(error_msg)
         return error_msg
+
+# --------------------  RAG СЕРВИС  --------------------
+class RAGService:
+    """Сервис для работы с RAG (Retrieval Augmented Generation)"""
+
+    def __init__(self,
+                 collection_name: str = "pdf_chunks",
+                 embedding_model: str = "qwen3-embedding:latest",
+                 ollama_host: str = "http://localhost:11434",
+                 qdrant_host: str = "localhost",
+                 qdrant_port: int = 6333):
+        self.collection_name = collection_name
+        self.embedding_model = embedding_model
+        self.ollama_host = ollama_host
+        self.qdrant_client = QdrantClient(host=qdrant_host, port=qdrant_port)
+
+    def generate_embedding(self, text: str) -> list[float]:
+        """Генерация эмбеддинга для текста через Ollama"""
+        try:
+            response = requests.post(
+                f"{self.ollama_host}/api/embeddings",
+                headers={"Content-Type": "application/json"},
+                json={
+                    "model": self.embedding_model,
+                    "prompt": text
+                },
+                timeout=30
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            embedding = result.get("embedding")
+
+            if embedding is None:
+                raise ValueError("Ollama не вернул эмбеддинг")
+
+            return embedding
+        except requests.exceptions.RequestException as e:
+            log.error(f"Ошибка при запросе к Ollama: {e}")
+            raise
+        except Exception as e:
+            log.error(f"Ошибка при генерации эмбеддинга: {e}")
+            raise
+
+    def search_similar(self, query: str, top_k: int = 5) -> list[dict]:
+        """Поиск похожих документов по запросу"""
+        try:
+            log.info(f"RAG: Отправка запроса в векторную базу данных - Запрос: '{query[:50]}...', top_k: {top_k}")
+
+            query_embedding = self.generate_embedding(query)
+            log.info(f"RAG: Сгенерирован эмбеддинг длиной {len(query_embedding) if query_embedding else 0} для запроса")
+
+            results = self.qdrant_client.query_points(
+                collection_name=self.collection_name,
+                query=query_embedding,
+                limit=top_k
+            )
+
+            # Handle the return value based on QdrantClient version
+            # The query_points method returns a QueryResponse object in newer versions
+            from qdrant_client.http.models import QueryResponse
+            if isinstance(results, QueryResponse):
+                # Extract the points from the response object
+                points = results.points
+            elif isinstance(results, tuple):
+                # If it returns a tuple, the actual results are likely the first element
+                points = results[0] if len(results) > 0 else []
+            elif hasattr(results, '__iter__') and not isinstance(results, (str, bytes)):
+                # If it's already iterable (like a list)
+                points = results
+            else:
+                # Fallback
+                points = []
+
+            log.info(f"RAG: Получено {len(points)} результатов из векторной базы данных")
+
+            similar_docs = []
+            for i, result in enumerate(points):
+                # Check if result has the expected attributes
+                score = getattr(result, 'score', 0)
+                payload = getattr(result, 'payload', {})
+
+                doc_info = {
+                    "score": score,
+                    "payload": payload,
+                    "text": payload.get("text", "") if isinstance(payload, dict) else "",
+                    "full_text": payload.get("full_text", "") if isinstance(payload, dict) else ""
+                }
+
+                log.info(f"RAG: Результат #{i+1} - Релевантность: {score:.3f}, Текст: '{doc_info['text'][:100]}...'")
+                similar_docs.append(doc_info)
+
+            return similar_docs
+        except Exception as e:
+            log.error(f"Ошибка при поиске похожих документов: {e}")
+            return []
+
+    def get_rag_response(self, query: str, top_k: int = 5) -> str:
+        """Получение ответа с использованием RAG"""
+        try:
+            # Поиск релевантных чанков
+            similar_docs = self.search_similar(query, top_k)
+
+            if not similar_docs:
+                # Если не найдено документов, просто возвращаем оригинальный запрос
+                log.info("Не найдено релевантных документов, возвращаем оригинальный запрос")
+                return query
+
+            # Объединение найденных документов с вопросом
+            # Включаем документы с содержимым и без, чтобы LLM понимал контекст
+            context_parts = []
+            for i, doc in enumerate(similar_docs):
+                text_content = doc['text'] or doc['full_text'] or (str(doc['payload']) if doc['payload'] else "Документ без текстового содержимого")
+                context_parts.append(f"Контекстный документ #{i+1} (релевантность: {doc['score']:.3f}): {text_content}")
+
+            context = "\n\n".join(context_parts)
+            rag_prompt = f"На основе следующей информации ответь на вопрос:\n\n{context}\n\nВопрос: {query}"
+
+            log.info(f"RAG: Найдено {len(similar_docs)} документов, длина контекста: {len(rag_prompt)} символов")
+            return rag_prompt
+        except Exception as e:
+            log.error(f"Ошибка при генерации RAG ответа: {e}")
+            # В случае ошибки возвращаем оригинальный запрос
+            return query
 
 # --------------------  MCP КЛИЕНТ  --------------------
 class MCPClient:
@@ -447,8 +576,8 @@ class DockerMCPClient:
 
 # --------------------  ЧАТ КЛИЕНТ  --------------------
 class ChatClient:
-    """Основной чат-клиент с интеграцией MCP."""
-    
+    """Основной чат-клиент с интеграцией MCP и RAG."""
+
     def __init__(self, model_name: str = "glm-4.5-air") -> None:
         self.model_name = model_name
         self.openai_client = build_openai_client()
@@ -456,10 +585,75 @@ class ChatClient:
         self.docker_mcp_client = DockerMCPClient()
         self.conversation: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
         self.temperature = 0.7
+        # Инициализация RAG сервиса
+        self.rag_service = RAGService()
+        self.use_rag = False  # Флаг для включения/выключения RAG
 
     async def process_query(self, query: str) -> str:
         """Обрабатывает запрос пользователя с использованием доступных инструментов."""
         log.info(f"Обработка запроса: {query[:50]}...")
+
+        # Проверяем, содержит ли запрос команду для включения/выключения RAG
+        if query.lower().startswith('/rag'):
+            # Извлекаем команду и текст запроса
+            parts = query.split(' ', 1)
+            if len(parts) == 1:
+                # Просто команда /rag - переключаем состояние
+                self.use_rag = not self.use_rag
+                status = "включён" if self.use_rag else "выключен"
+                return f"RAG режим {status}."
+            else:
+                # /rag с текстом запроса - обрабатываем с RAG
+                actual_query = parts[1]
+                rag_prompt = self.rag_service.get_rag_response(actual_query)
+
+                # Отправляем RAG-запрос к LLM
+                messages = self.conversation + [{"role": "user", "content": rag_prompt}]
+
+                try:
+                    response = await self.openai_client.chat.completions.create(
+                        model=self.model_name,
+                        messages=messages,
+                        temperature=self.temperature,
+                        max_tokens=2048,
+                    )
+                    content = response.choices[0].message.content or ""
+
+                    # Добавляем оригинальный запрос и ответ в историю разговора
+                    self.conversation.append({"role": "user", "content": actual_query})
+                    self.conversation.append({"role": "assistant", "content": content})
+
+                    return content
+                except Exception as exc:
+                    error_msg = f"Ошибка при обработке RAG запроса: {exc}"
+                    log.error(error_msg)
+                    return f"Извините, произошла ошибка при обработке RAG запроса: {exc}"
+
+        # Если RAG включен и запрос не начинается с /rag, используем RAG для обычного запроса
+        elif self.use_rag:
+            rag_prompt = self.rag_service.get_rag_response(query)
+
+            # Отправляем RAG-запрос к LLM
+            messages = self.conversation + [{"role": "user", "content": rag_prompt}]
+
+            try:
+                response = await self.openai_client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    temperature=self.temperature,
+                    max_tokens=2048,
+                )
+                content = response.choices[0].message.content or ""
+
+                # Добавляем оригинальный запрос и ответ в историю разговора
+                self.conversation.append({"role": "user", "content": query})
+                self.conversation.append({"role": "assistant", "content": content})
+
+                return content
+            except Exception as exc:
+                error_msg = f"Ошибка при обработке RAG запроса: {exc}"
+                log.error(error_msg)
+                return f"Извините, произошла ошибка при обработке RAG запроса: {exc}"
 
         try:
             # Объединяем инструменты из обоих клиентов
@@ -680,6 +874,7 @@ async def interactive_chat(client: ChatClient) -> None:
     print("=" * 60)
     print("ROBOT Чат-клиент с MCP инструментами")
     print("Команды: quit/exit, save <имя>, load <имя>, temp <0-2>, clear, print")
+    print("RAG команды: /rag (вкл/выкл), /rag <вопрос> (вопрос с RAG)")
     print("=" * 60)
 
     while True:
