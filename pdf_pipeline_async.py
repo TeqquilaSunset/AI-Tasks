@@ -178,17 +178,21 @@ class QdrantIndexer:
             log.error(f"Ошибка при создании коллекции: {e}")
             return False
 
-    def store_embeddings(self, chunks: List[str], embeddings: List[List[float]], metadata_list: Optional[List[Dict]] = None) -> bool:
+    def store_embeddings(self, chunks: List[str], embeddings: List[List[float]], pdf_path: str, metadata_list: Optional[List[Dict]] = None) -> bool:
         """Сохранение эмбеддингов и чанков в Qdrant"""
         try:
             points = []
+
+            # Получаем имя файла из пути
+            source_document = os.path.basename(pdf_path)
 
             for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
                 # Подготовка метаданных
                 metadata = {
                     "chunk_id": i,
                     "text": chunk[:200] + "..." if len(chunk) > 200 else chunk,  # Обрезаем текст для экономии места
-                    "full_text": chunk  # Полный текст в метаданных
+                    "full_text": chunk,  # Полный текст в метаданных
+                    "source_document": source_document  # Добавляем имя исходного документа
                 }
 
                 # Добавляем дополнительные метаданные, если они предоставлены
@@ -209,7 +213,7 @@ class QdrantIndexer:
             for i in range(0, len(points), batch_size):
                 batch = points[i:i+batch_size]
                 self.client.upsert(collection_name=self.collection_name, points=batch)
-                log.info(f"Сохранено {len(batch)} точек в коллекцию '{self.collection_name}' ({i+batch_size}/{len(points)})")
+                log.info(f"Сохранено {len(batch)} точек в коллекцию '{self.collection_name}' из документа '{source_document}' ({i+batch_size}/{len(points)})")
 
             return True
         except Exception as e:
@@ -299,7 +303,7 @@ async def main(pdf_path: str, chunk_size: int = 1024, overlap: int = 50,
         log.error("Нет сгенерированных эмбеддингов")
         return False
 
-    success = indexer.store_embeddings(chunks, embeddings)
+    success = indexer.store_embeddings(chunks, embeddings, pdf_path)
 
     if success:
         log.info("Пайплайн успешно завершен!")

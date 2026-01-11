@@ -62,7 +62,7 @@ def save_conversation(history: tp.List[dict], name: str | None = None) -> str:
     name = f"conversation_{datetime.now():%Y%m%d_%H%M%S}.json" if name is None else name
     if not name.endswith(".json"):
         name += ".json"
-    
+
     path = SAVE_DIR / name
     try:
         path.write_text(json.dumps(history, ensure_ascii=False, indent=2))
@@ -84,13 +84,13 @@ def load_conversation(name: str) -> tp.Tuple[tp.List[dict] | None, str]:
                 path = files[idx]
                 return json.loads(path.read_text()), str(path)
             return None, "Неверный номер сохранения."
-        
+
         # Загрузка по имени
         path = SAVE_DIR / (name if name.endswith(".json") else f"{name}.json")
         if path.exists():
             return json.loads(path.read_text()), str(path)
         return None, f"Файл {path} не найден."
-        
+
     except Exception as exc:
         error_msg = f"Ошибка при загрузке: {exc}"
         log.error(error_msg)
@@ -101,7 +101,7 @@ def list_saved_conversations() -> str:
     files = sorted(SAVE_DIR.glob("conversation_*.json"), reverse=True)
     if not files:
         return "Нет сохранённых разговоров."
-    
+
     lines = ["Сохранённые разговоры:", "=" * 40]
     for idx, fp in enumerate(files, 1):
         # Извлекаем дату из имени файла
@@ -111,9 +111,9 @@ def list_saved_conversations() -> str:
             nice_date = dt.strftime("%Y-%m-%d %H:%M:%S")
         except:
             nice_date = fp.stem
-        
+
         lines.append(f"{idx}. {nice_date} – {fp.name}")
-    
+
     return "\n".join(lines)
 
 async def create_summary(cli: openai.AsyncOpenAI, model: str, history: tp.List[dict]) -> str:
@@ -228,10 +228,13 @@ class RAGService:
                     "score": score,
                     "payload": payload,
                     "text": payload.get("text", "") if isinstance(payload, dict) else "",
-                    "full_text": payload.get("full_text", "") if isinstance(payload, dict) else ""
+                    "full_text": payload.get("full_text", "") if isinstance(payload, dict) else "",
+                    "source_document": payload.get("source_document", "") if isinstance(payload, dict) else ""  # Добавляем имя исходного документа
                 }
 
-                log.info(f"RAG: Результат #{i+1} - Релевантность: {score:.3f}, Текст: '{doc_info['text'][:100]}...'")
+                # Логируем информацию о документе, включая источник
+                source_info = f" (Источник: {doc_info['source_document']})" if doc_info['source_document'] else ""
+                log.info(f"RAG: Результат #{i+1} - Релевантность: {score:.3f}, Текст: '{doc_info['text'][:100]}...'{source_info}")
                 similar_docs.append(doc_info)
 
             # Применяем реранкер, если он включен
@@ -329,7 +332,8 @@ class RAGService:
             context_parts = []
             for i, doc in enumerate(similar_docs):
                 text_content = doc['text'] or doc['full_text'] or (str(doc['payload']) if doc['payload'] else "Документ без текстового содержимого")
-                context_parts.append(f"Контекстный документ #{i+1} (релевантность: {doc['score']:.3f}): {text_content}")
+                source_info = f" (Источник: {doc['source_document']})" if doc['source_document'] else ""
+                context_parts.append(f"Контекстный документ #{i+1}{source_info} (релевантность: {doc['score']:.3f}): {text_content}")
 
             context = "\n\n".join(context_parts)
             rag_prompt = f"На основе следующей информации ответь на вопрос:\n\n{context}\n\nВопрос: {query}"
@@ -344,7 +348,7 @@ class RAGService:
 # --------------------  MCP КЛИЕНТ  --------------------
 class MCPClient:
     """Современный MCP клиент с улучшенным управлением ресурсами."""
-    
+
     def __init__(self) -> None:
         self.session: ClientSession | None = None
         self.exit_stack = AsyncExitStack()
@@ -354,33 +358,33 @@ class MCPClient:
     async def connect_to_server(self, server_script_path: str) -> None:
         """Подключается к MCP серверу."""
         log.info(f"Подключение к серверу: {server_script_path}")
-        
+
         if not Path(server_script_path).exists():
             raise FileNotFoundError(f"Сервер не найден: {server_script_path}")
-        
+
         # Параметры для запуска сервера
         server_params = StdioServerParameters(
             command=sys.executable,
             args=[server_script_path],
             env={**os.environ}
         )
-        
+
         # Создаем транспорт и сессию через контекстный менеджер
         stdio_transport = await self.exit_stack.enter_async_context(
             stdio_client(server_params)
         )
-        
+
         self.session = await self.exit_stack.enter_async_context(
             ClientSession(
-                stdio_transport[0], 
+                stdio_transport[0],
                 stdio_transport[1],
                 client_info={"name": "mcp-client", "version": "1.0.0"}
             )
         )
-        
+
         # Инициализируем сессию
         await self.session.initialize()
-        
+
         # Получаем список инструментов
         tools_result = await self.session.list_tools()
         self.tools = [
@@ -394,10 +398,10 @@ class MCPClient:
             }
             for tool in (tools_result.tools if tools_result else [])
         ]
-        
+
         self._running = True
         log.info(f"Подключено к серверу. Доступно инструментов: {len(self.tools)}")
-        
+
         if self.tools:
             for tool in self.tools:
                 log.info(f"  - {tool['function']['name']}: {tool['function']['description']}")
@@ -406,18 +410,18 @@ class MCPClient:
         """Вызывает инструмент MCP сервера."""
         if not self._running or not self.session:
             return "[Ошибка] Сервер не подключен"
-        
+
         try:
             result = await self.session.call_tool(name, arguments)
-            
+
             # Объединяем все текстовые блоки в один ответ
             text_parts = []
             for block in result.content or []:
                 if hasattr(block, 'text'):
                     text_parts.append(block.text)
-            
+
             return "\n".join(text_parts) if text_parts else "Инструмент выполнен без результата"
-            
+
         except Exception as exc:
             error_msg = f"Ошибка вызова инструмента {name}: {exc}"
             log.error(error_msg)
@@ -1087,14 +1091,14 @@ async def main() -> None:
     """Главная функция запуска."""
     # Создаем клиента
     client = ChatClient(model_name="glm-4.5-air")
-    
+
     try:
         # Подключаемся к MCP серверу
         await client.start(SERVER_SCRIPT)
-        
+
         # Запускаем интерактивный чат
         await interactive_chat(client)
-        
+
     except KeyboardInterrupt:
         print("\n\nSTOP Прервано пользователем")
     except Exception as exc:
