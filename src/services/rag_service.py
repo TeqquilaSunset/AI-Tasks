@@ -7,6 +7,7 @@ import requests
 
 from ..config import (
     DEFAULT_COLLECTION_NAME,
+    DEFAULT_DOCS_COLLECTION,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_OLLAMA_HOST,
     DEFAULT_QDRANT_HOST,
@@ -40,23 +41,38 @@ class RAGService:
         ollama_host: str = DEFAULT_OLLAMA_HOST,
         qdrant_host: str = DEFAULT_QDRANT_HOST,
         qdrant_port: int = DEFAULT_QDRANT_PORT,
+        search_docs: bool = True,  # Whether to also search in project_docs
     ) -> None:
         """
         Initialize the RAG service.
 
         Args:
-            collection_name: Name of the Qdrant collection
+            collection_name: Name of the Qdrant collection (default: pdf_chunks)
             embedding_model: Name of the Ollama embedding model
             ollama_host: URL of the Ollama API
             qdrant_host: Qdrant host address
             qdrant_port: Qdrant port
+            search_docs: Whether to also search in project_docs collection
         """
         self.collection_name = collection_name
         self.embedding_model = embedding_model
         self.ollama_host = ollama_host
+        self.qdrant_host = qdrant_host
+        self.qdrant_port = qdrant_port
+        self.search_docs = search_docs
+
+        # Primary collection indexer
         self.qdrant_indexer = QdrantIndexer(
             host=qdrant_host, port=qdrant_port, collection_name=collection_name
         )
+
+        # Optional docs collection indexer (for indexed project documentation)
+        self.docs_indexer = None
+        if search_docs and collection_name != DEFAULT_DOCS_COLLECTION:
+            self.docs_indexer = QdrantIndexer(
+                host=qdrant_host, port=qdrant_port, collection_name=DEFAULT_DOCS_COLLECTION
+            )
+
         self.reranker_enabled = False
         self.relevance_threshold = DEFAULT_RELEVANCE_THRESHOLD
         self.log = setup_logging("rag-service")
@@ -102,6 +118,8 @@ class RAGService:
         """
         Search for similar documents by query.
 
+        Searches in both pdf_chunks and project_docs collections (if enabled).
+
         Args:
             query: Search query text
             top_k: Number of results to return
@@ -119,13 +137,40 @@ class RAGService:
                 f"RAG: Generated embedding of length {len(query_embedding) if query_embedding else 0} for query"
             )
 
+            all_points = []
+
+            # Search in primary collection (pdf_chunks)
             points = self.qdrant_indexer.query_points(query_embedding, limit=top_k)
-            self.log.info(f"RAG: Received {len(points)} results from vector database")
+            self.log.info(f"RAG: Received {len(points)} results from {self.collection_name}")
+            all_points.extend(points)
+
+            # Search in docs collection (project_docs) if enabled
+            if self.docs_indexer:
+                try:
+                    docs_points = self.docs_indexer.query_points(query_embedding, limit=top_k)
+                    self.log.info(f"RAG: Received {len(docs_points)} results from {DEFAULT_DOCS_COLLECTION}")
+                    all_points.extend(docs_points)
+                except Exception as e:
+                    self.log.warning(f"RAG: Could not search in docs collection: {e}")
+
+            # Sort all results by score and take top_k
+            all_points.sort(key=lambda p: getattr(p, "score", 0), reverse=True)
+            all_points = all_points[:top_k]
+
+            self.log.info(f"RAG: Total results after merging: {len(all_points)}")
 
             similar_docs = []
-            for i, result in enumerate(points):
+            for i, result in enumerate(all_points):
                 score = getattr(result, "score", 0)
                 payload = getattr(result, "payload", {})
+
+                # Get source from either field (for compatibility with both PDF and docs indexing)
+                source = (
+                    payload.get("source_document", "")
+                    or payload.get("source_file", "")
+                    if isinstance(payload, dict)
+                    else ""
+                )
 
                 doc_info = {
                     "score": score,
@@ -134,18 +179,10 @@ class RAGService:
                     "full_text": (
                         payload.get("full_text", "") if isinstance(payload, dict) else ""
                     ),
-                    "source_document": (
-                        payload.get("source_document", "")
-                        if isinstance(payload, dict)
-                        else ""
-                    ),
+                    "source_document": source,
                 }
 
-                source_info = (
-                    f" (Source: {doc_info['source_document']})"
-                    if doc_info["source_document"]
-                    else ""
-                )
+                source_info = f" (Source: {source})" if source else ""
                 self.log.info(
                     f"RAG: Result #{i + 1} - Relevance: {score:.3f}, Text: '{doc_info['text'][:100]}...'{source_info}"
                 )

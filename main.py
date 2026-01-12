@@ -31,7 +31,7 @@ from src.config import (
     SERVER_SCRIPT,
     SYSTEM_PROMPT,
 )
-from src.services import RAGService
+from src.services import RAGService, HelpService
 from src.utils import setup_logging
 
 load_dotenv()
@@ -147,7 +147,7 @@ async def create_summary(
 # -------------------- CHAT CLIENT --------------------
 class ChatClient:
     """
-    Main chat client with MCP and RAG integration.
+    Main chat client with MCP, RAG, and Help integration.
 
     Attributes:
         model_name: Name of the LLM model
@@ -157,6 +157,7 @@ class ChatClient:
         conversation: Conversation history
         temperature: LLM temperature setting
         rag_service: RAG service instance
+        help_service: Help service instance
         use_rag: Whether RAG mode is enabled
     """
 
@@ -176,6 +177,7 @@ class ChatClient:
         ]
         self.temperature = DEFAULT_TEMPERATURE
         self.rag_service = RAGService()
+        self.help_service = HelpService()
         self.use_rag = False
 
     async def process_query(self, query: str) -> str:
@@ -190,6 +192,10 @@ class ChatClient:
         """
         log.info(f"Processing query: {query[:50]}...")
 
+        # Check for help commands
+        if query.lower().startswith("/help"):
+            return await self._handle_help_command(query)
+
         # Check for RAG control commands
         if query.lower().startswith("/rag"):
             return await self._handle_rag_command(query)
@@ -200,6 +206,270 @@ class ChatClient:
 
         # Process normally with tools
         return await self._process_with_tools(query)
+
+    async def _handle_help_command(self, query: str) -> str:
+        """Handle /help commands with RAG documentation and git context."""
+        parts = query.split(" ", 1)
+        subcommand = parts[1].strip() if len(parts) > 1 else ""
+
+        # Handle subcommands
+        if subcommand.lower() in ("style", "guidelines", "conventions"):
+            # Style guide help
+            return await self._help_with_style_guide()
+        elif subcommand.lower().startswith("api"):
+            # API reference help
+            component = subcommand[3:].strip() if len(subcommand) > 3 else ""
+            return await self._help_with_api(component)
+        elif subcommand.lower() in ("structure", "architecture", "modules"):
+            # Project structure help
+            return await self._help_with_structure()
+        elif subcommand.lower() == "git":
+            # Git status help
+            return await self._help_with_git_context()
+        else:
+            # General help with documentation search
+            return await self._help_with_docs(subcommand or "project overview getting started")
+
+    async def _help_with_docs(self, question: str) -> str:
+        """Get help with documentation search and git context."""
+        try:
+            # Gather git context first
+            git_context = await self._gather_git_context()
+
+            # Get help response from service
+            help_prompt = self.help_service.get_help_response(
+                question, git_context=git_context, top_k=5
+            )
+
+            messages = self.conversation + [{"role": "user", "content": help_prompt}]
+
+            response = await self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=2048,
+            )
+            content = response.choices[0].message.content or ""
+
+            # Don't add help queries to history
+            return content
+
+        except Exception as exc:
+            error_msg = f"Error getting help: {exc}"
+            log.error(error_msg)
+            return (
+                f"Sorry, I couldn't find help information. "
+                f"Make sure to run 'python index_docs.py' to index project documentation. "
+                f"Error: {exc}"
+            )
+
+    async def _help_with_style_guide(self) -> str:
+        """Get coding style guidelines."""
+        style_guide = self.help_service.get_style_guide_help()
+        messages = self.conversation + [{"role": "user", "content": style_guide}]
+
+        response = await self.openai_client.chat.completions.create(
+            model=self.model_name,
+            messages=messages,
+            temperature=self.temperature,
+            max_tokens=2048,
+        )
+        return response.choices[0].message.content or "No style guide available."
+
+    async def _help_with_api(self, component: str) -> str:
+        """Get API reference for a component."""
+        api_ref = self.help_service.get_api_reference(component)
+        messages = self.conversation + [{"role": "user", "content": api_ref}]
+
+        response = await self.openai_client.chat.completions.create(
+            model=self.model_name,
+            messages=messages,
+            temperature=self.temperature,
+            max_tokens=2048,
+        )
+        return response.choices[0].message.content or "No API reference available."
+
+    async def _help_with_structure(self) -> str:
+        """Get project structure information."""
+        structure_info = self.help_service.get_project_structure()
+        messages = self.conversation + [{"role": "user", "content": structure_info}]
+
+        response = await self.openai_client.chat.completions.create(
+            model=self.model_name,
+            messages=messages,
+            temperature=self.temperature,
+            max_tokens=2048,
+        )
+        return response.choices[0].message.content or "No structure information available."
+
+    async def _help_with_git_context(self) -> str:
+        """Get help with current git context."""
+        log.info("=" * 50)
+        log.info("[/help git] Starting git context request")
+        start_time = datetime.now()
+
+        try:
+            # Get git info directly (NOT through MCP to avoid blocking)
+            import subprocess
+            log.info("[/help git] Running git commands directly...")
+
+            git_start = datetime.now()
+            info = []
+
+            # Branch
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, timeout=5, cwd="."
+                )
+                if result.stdout and not result.stderr:
+                    info.append(f"Branch: {result.stdout.strip()}")
+            except Exception as e:
+                log.warning(f"git branch failed: {e}")
+
+            # Remote
+            try:
+                result = subprocess.run(
+                    ["git", "config", "--get", "remote.origin.url"],
+                    capture_output=True, text=True, timeout=5, cwd="."
+                )
+                if result.stdout and not result.stderr:
+                    info.append(f"Remote: {result.stdout.strip()}")
+            except Exception as e:
+                log.warning(f"git remote failed: {e}")
+
+            # Commits
+            try:
+                result = subprocess.run(
+                    ["git", "rev-list", "--count", "HEAD"],
+                    capture_output=True, text=True, timeout=5, cwd="."
+                )
+                if result.stdout and not result.stderr:
+                    info.append(f"Commits: {result.stdout.strip()}")
+            except Exception as e:
+                log.warning(f"git count failed: {e}")
+
+            # Latest
+            try:
+                result = subprocess.run(
+                    ["git", "log", "-1", "--format=%h %s (%cr)"],
+                    capture_output=True, text=True, timeout=5, cwd="."
+                )
+                if result.stdout and not result.stderr:
+                    info.append(f"Latest: {result.stdout.strip()}")
+            except Exception as e:
+                log.warning(f"git log failed: {e}")
+
+            # Status
+            try:
+                result = subprocess.run(
+                    ["git", "status", "--short"],
+                    capture_output=True, text=True, timeout=5, cwd="."
+                )
+                if result.stderr and "not a git repository" in result.stderr.lower():
+                    info.append("Not a git repository")
+                elif result.stdout.strip():
+                    info.append(f"Status: {result.stdout.strip()[:100]}")
+                else:
+                    info.append("Clean (no changes)")
+            except Exception as e:
+                log.warning(f"git status failed: {e}")
+
+            git_elapsed = (datetime.now() - git_start).total_seconds()
+            repo_info = "\n".join(info)
+            log.info(f"[/help git] Git commands completed in {git_elapsed:.2f}s")
+            log.info(f"[/help git] Result:\n{repo_info}")
+
+            git_summary = f"""Current git repository state:
+
+{repo_info}
+
+Provide a brief summary of the project state and any recommendations."""
+
+            log.info("[/help git] Sending to LLM for analysis...")
+            llm_start = datetime.now()
+            messages = self.conversation + [{"role": "user", "content": git_summary}]
+
+            response = await self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=2048,
+            )
+            llm_elapsed = (datetime.now() - llm_start).total_seconds()
+            log.info(f"[/help git] LLM response completed in {llm_elapsed:.2f}s")
+
+            total_elapsed = (datetime.now() - start_time).total_seconds()
+            log.info(f"[/help git] Total time: {total_elapsed:.2f}s")
+            log.info("=" * 50)
+
+            return response.choices[0].message.content or "Could not retrieve git context."
+
+        except Exception as exc:
+            total_elapsed = (datetime.now() - start_time).total_seconds()
+            log.error(f"[/help git] Error after {total_elapsed:.2f}s: {exc}")
+            log.info("=" * 50)
+            return f"Error getting git context: {exc}"
+
+    async def _gather_git_context(self) -> Dict[str, str]:
+        """Gather git context for help queries using subprocess directly (avoids MCP blocking)."""
+        context = {}
+
+        try:
+            import subprocess
+            info = []
+
+            # Branch
+            try:
+                result = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture_output=True, text=True, timeout=5, cwd="."
+                )
+                if result.stdout and not result.stderr:
+                    context["current_branch"] = result.stdout.strip()
+            except Exception:
+                pass
+
+            # Remote
+            try:
+                result = subprocess.run(
+                    ["git", "config", "--get", "remote.origin.url"],
+                    capture_output=True, text=True, timeout=5, cwd="."
+                )
+                if result.stdout and not result.stderr:
+                    info.append(f"Remote: {result.stdout.strip()}")
+            except Exception:
+                pass
+
+            # Commits
+            try:
+                result = subprocess.run(
+                    ["git", "rev-list", "--count", "HEAD"],
+                    capture_output=True, text=True, timeout=5, cwd="."
+                )
+                if result.stdout and not result.stderr:
+                    info.append(f"Commits: {result.stdout.strip()}")
+            except Exception:
+                pass
+
+            # Latest
+            try:
+                result = subprocess.run(
+                    ["git", "log", "-1", "--format=%h %s (%cr)"],
+                    capture_output=True, text=True, timeout=5, cwd="."
+                )
+                if result.stdout and not result.stderr:
+                    info.append(f"Latest: {result.stdout.strip()}")
+            except Exception:
+                pass
+
+            if info:
+                context["repo_info"] = "\n".join(info)
+
+        except Exception as e:
+            log.warning(f"Could not gather git context: {e}")
+
+        return context
 
     async def _handle_rag_command(self, query: str) -> str:
         """Handle RAG-specific commands."""
@@ -417,6 +687,7 @@ class ChatClient:
 
     async def _call_appropriate_tool(self, name: str, arguments: dict) -> str:
         """Determine which client to use for tool call."""
+        start = datetime.now()
         stdio_tool_names = [
             tool["function"]["name"] for tool in self.mcp_client.available_tools
         ]
@@ -425,14 +696,18 @@ class ChatClient:
             for tool in self.docker_mcp_client.available_tools
         ]
 
-        log.info(f"Attempting to call tool '{name}' with arguments: {arguments}")
+        log.info(f"[MCP] → {name}({arguments})")
 
         if name in stdio_tool_names:
-            log.info(f"Calling tool '{name}' via stdio client")
-            return await self.mcp_client.call_tool(name, arguments)
+            result = await self.mcp_client.call_tool(name, arguments)
+            elapsed = (datetime.now() - start).total_seconds()
+            log.info(f"[MCP] ← {name} completed in {elapsed:.3f}s | {len(result)} chars")
+            return result
         elif name in docker_tool_names:
-            log.info(f"Calling tool '{name}' via Docker client")
-            return await self.docker_mcp_client.call_tool(name, arguments)
+            result = await self.docker_mcp_client.call_tool(name, arguments)
+            elapsed = (datetime.now() - start).total_seconds()
+            log.info(f"[MCP] ← {name} completed in {elapsed:.3f}s | {len(result)} chars")
+            return result
         else:
             # Try both clients
             if self.mcp_client._running:
@@ -440,7 +715,8 @@ class ChatClient:
                 if result and not (
                     result.startswith("[Error]") or result.startswith("[Warning]")
                 ):
-                    log.info(f"Tool '{name}' successfully called via stdio client")
+                    elapsed = (datetime.now() - start).total_seconds()
+                    log.info(f"[MCP] ← {name} completed in {elapsed:.3f}s (fallback)")
                     return result
 
             if self.docker_mcp_client.connected:
@@ -448,9 +724,12 @@ class ChatClient:
                 if result and not (
                     result.startswith("[Error]") or result.startswith("[Warning]")
                 ):
-                    log.info(f"Tool '{name}' successfully called via Docker client")
+                    elapsed = (datetime.now() - start).total_seconds()
+                    log.info(f"[MCP] ← {name} completed in {elapsed:.3f}s (fallback)")
                     return result
 
+            elapsed = (datetime.now() - start).total_seconds()
+            log.error(f"[MCP] ✗ {name} not found (took {elapsed:.3f}s)")
             return f"[Error] Tool '{name}' not found in any active MCP servers"
 
     async def start(self, server_script: str) -> None:
@@ -484,6 +763,9 @@ async def interactive_chat(client: ChatClient) -> None:
     print("Commands: quit/exit, save <name>, load <name>, temp <0-2>, clear, print")
     print(
         "RAG commands: /rag (toggle), /rag <question> (RAG query), /rag rerank (toggle reranker), /rag threshold <value>"
+    )
+    print(
+        "Help commands: /help, /help <question>, /help style, /help api, /help structure, /help git"
     )
     print("=" * 60)
 

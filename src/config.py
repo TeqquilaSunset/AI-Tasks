@@ -30,6 +30,7 @@ DOCKER_MCP_URL = f"http://{DOCKER_MCP_HOST}:{DOCKER_MCP_PORT}/mcp"
 
 # -------------------- RAG CONFIG --------------------
 DEFAULT_COLLECTION_NAME = "pdf_chunks"
+DEFAULT_DOCS_COLLECTION = "project_docs"  # For indexed project documentation
 DEFAULT_EMBEDDING_MODEL = "qwen3-embedding:latest"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_QDRANT_HOST = "localhost"

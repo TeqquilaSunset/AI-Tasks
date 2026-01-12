@@ -19,6 +19,16 @@
   - Поиск по документам
   - Реранкинг результатов
   - Настраиваемый порог релевантности
+- **Git интеграция через MCP**:
+  - Получение текущей ветки и статуса
+  - Просмотр изменений (diff)
+  - История коммитов
+  - Содержимое файлов
+- **/help команда**:
+  - Поиск по проектной документации
+  - Git-контекстная справка
+  - Справочник по API и структуре
+  - Руководство по стилю кода
 - **PDF обработка**: Пайплайн для индексации документов
   - Синхронная и асинхронная (GPU-оптимизированная) версии
   - Генерация эмбеддингов через Ollama
@@ -27,6 +37,7 @@
   - Сохранение/загрузка истории
   - Настройка температуры
   - RAG команды
+  - Help команды
 
 ### Структура проекта (после рефакторинга)
 
@@ -38,17 +49,20 @@ AI-Task-1/
 │   │   ├── __init__.py
 │   │   ├── logging_config.py     # Настройка логирования
 │   │   ├── pdf_chunker.py        # Разбиение PDF на чанки
+│   │   ├── docs_chunker.py       # Разбиение документации
 │   │   ├── ollama_client.py      # Клиент для эмбеддингов
 │   │   └── qdrant_client.py      # Клиент векторной БД
 │   ├── services/                 # Бизнес-логика
 │   │   ├── __init__.py
-│   │   └── rag_service.py        # RAG сервис
+│   │   ├── rag_service.py        # RAG сервис
+│   │   └── help_service.py       # Help сервис (новое!)
 │   └── clients/                  # MCP клиенты
 │       ├── __init__.py
 │       ├── mcp_client.py         # STDIO MCP клиент
 │       └── docker_mcp_client.py  # Docker MCP клиент
 ├── main.py                       # Главный чат-клиент (рефакторинг)
-├── mcp_server.py                 # MCP сервер с инструментами
+├── mcp_server.py                 # MCP сервер (+ Git инструменты!)
+├── index_docs.py                 # Индексация документации (новое!)
 ├── pdf_pipeline.py               # PDF пайплайн (синхронный)
 ├── pdf_pipeline_async.py         # PDF пайплайн (асинхронный)
 ├── run_pipeline_gpu.py           # GPU-оптимизированный запуск
@@ -115,6 +129,32 @@ python main.py
 - `/rag rerank` - вкл/выкл реранкер
 - `/rag threshold <0-1>` - установить порог
 
+**Help команды** (новое!):
+- `/help` - общая справка по проекту
+- `/help <вопрос>` - поиск по документации проекта
+- `/help style` - руководство по стилю кода
+- `/help api [компонент]` - справочник по API
+- `/help structure` - структура проекта
+- `/help git` - текущий git-контекст
+
+#### Индексация документации (новое!)
+
+Перед использованием команды `/help`, необходимо проиндексировать документацию проекта:
+
+```bash
+# Индексация всех файлов проекта
+python index_docs.py
+
+# С параметрами
+python index_docs.py --project_root . --collection_name project_docs --extensions .md .py .txt .yml .json
+```
+
+**Параметры индексации**:
+- `--project_root` - корневая директория проекта (по умолчанию: текущая)
+- `--collection_name` - название коллекции в Qdrant (по умолчанию: project_docs)
+- `--chunk_size` - размер чанка текста (по умолчанию: 1024)
+- `--extensions` - типы файлов для индексации
+
 #### PDF индексация
 
 ```bash
@@ -141,10 +181,23 @@ python run_pipeline_gpu.py --pdf_path document.pdf --use_async --max_concurrent 
 
 Доступные инструменты при запуске чата:
 
+**Погодные инструменты**:
 - `get_weather` - текущая погода для города
 - `get_weather_forecast` - прогноз на несколько дней
 - `convert_temperature` - конвертация температуры
 - `save_weather_data` - сохранение погодных данных
+
+**Git инструменты** (новое!):
+- `git_get_current_branch` - текущая ветка
+- `git_get_branches` - список всех веток
+- `git_get_status` - статус изменений
+- `git_get_diff` - показать изменения (diff)
+- `git_get_recent_commits` - последние коммиты
+- `git_get_file_content` - содержимое файла
+- `git_list_files` - список файлов в репозитории
+- `git_get_repo_info` - информация о репозитории
+
+**Другие инструменты**:
 - `execute_python_code` - выполнение Python в Docker
 - `stub_tool` - заглушка для тестов
 
@@ -196,6 +249,16 @@ python run_pipeline_gpu.py --pdf_path document.pdf --use_async --max_concurrent 
   - Document search
   - Result reranking
   - Configurable relevance threshold
+- **Git Integration via MCP**:
+  - Current branch and status
+  - View changes (diff)
+  - Commit history
+  - File content retrieval
+- **/help Command**:
+  - Search project documentation
+  - Git-context aware help
+  - API reference and structure info
+  - Code style guidelines
 - **PDF Processing**: Document indexing pipeline
   - Synchronous and asynchronous (GPU-optimized) versions
   - Ollama embedding generation
@@ -204,6 +267,7 @@ python run_pipeline_gpu.py --pdf_path document.pdf --use_async --max_concurrent 
   - Save/load history
   - Temperature control
   - RAG commands
+  - Help commands
 
 ### Project Structure (after refactoring)
 
@@ -215,17 +279,20 @@ AI-Task-1/
 │   │   ├── __init__.py
 │   │   ├── logging_config.py     # Logging setup
 │   │   ├── pdf_chunker.py        # PDF chunking
+│   │   ├── docs_chunker.py       # Documentation chunking
 │   │   ├── ollama_client.py      # Embedding client
 │   │   └── qdrant_client.py      # Vector DB client
 │   ├── services/                 # Business logic
 │   │   ├── __init__.py
-│   │   └── rag_service.py        # RAG service
+│   │   ├── rag_service.py        # RAG service
+│   │   └── help_service.py       # Help service (new!)
 │   └── clients/                  # MCP clients
 │       ├── __init__.py
 │       ├── mcp_client.py         # STDIO MCP client
 │       └── docker_mcp_client.py  # Docker MCP client
 ├── main.py                       # Main chat client (refactored)
-├── mcp_server.py                 # MCP server with tools
+├── mcp_server.py                 # MCP server (+ Git tools!)
+├── index_docs.py                 # Documentation indexer (new!)
 ├── pdf_pipeline.py               # PDF pipeline (sync)
 ├── pdf_pipeline_async.py         # PDF pipeline (async)
 ├── run_pipeline_gpu.py           # GPU-optimized runner
@@ -292,6 +359,32 @@ python main.py
 - `/rag rerank` - toggle reranker
 - `/rag threshold <0-1>` - set threshold
 
+**Help Commands** (new!):
+- `/help` - general project help
+- `/help <question>` - search project documentation
+- `/help style` - code style guidelines
+- `/help api [component]` - API reference
+- `/help structure` - project structure
+- `/help git` - current git context
+
+#### Documentation Indexing (new!)
+
+Before using `/help` command, index project documentation:
+
+```bash
+# Index all project files
+python index_docs.py
+
+# With parameters
+python index_docs.py --project_root . --collection_name project_docs --extensions .md .py .txt .yml .json
+```
+
+**Indexing Parameters**:
+- `--project_root` - project root directory (default: current)
+- `--collection_name` - Qdrant collection name (default: project_docs)
+- `--chunk_size` - text chunk size (default: 1024)
+- `--extensions` - file types to index
+
 #### PDF Indexing
 
 ```bash
@@ -318,10 +411,23 @@ python run_pipeline_gpu.py --pdf_path document.pdf --use_async --max_concurrent 
 
 Available tools when running chat:
 
+**Weather Tools**:
 - `get_weather` - current weather for city
 - `get_weather_forecast` - multi-day forecast
 - `convert_temperature` - temperature conversion
 - `save_weather_data` - save weather data
+
+**Git Tools** (new!):
+- `git_get_current_branch` - current branch
+- `git_get_branches` - list all branches
+- `git_get_status` - working directory status
+- `git_get_diff` - show changes (diff)
+- `git_get_recent_commits` - recent commits
+- `git_get_file_content` - file content
+- `git_list_files` - repository files
+- `git_get_repo_info` - repository information
+
+**Other Tools**:
 - `execute_python_code` - execute Python in Docker
 - `stub_tool` - stub for testing
 

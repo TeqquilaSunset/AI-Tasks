@@ -5,9 +5,14 @@ MCP-сервер с погодой на основе FastMCP (современн
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import os
+import subprocess
 import sys
 import tempfile
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 import docker
@@ -217,10 +222,6 @@ async def convert_temperature(value: float, from_unit: str = "celsius", to_unit:
     
     return f"{value} {symbols[from_unit]} = {result:.2f} {symbols[to_unit]}"
 
-import json
-from datetime import datetime
-from pathlib import Path
-
 @mcp.tool()
 async def save_weather_data(data: str, filename: str = "weather_data.json") -> str:
     """Сохранить погодные данные в JSON файл.
@@ -385,6 +386,148 @@ async def execute_python_code(code: str) -> str:
         error_msg = f"Ошибка инициализации Docker клиента: {str(e)}"
         log.error(error_msg)
         return error_msg
+
+
+# --------------------  GIT TOOLS  --------------------
+def _run_git(cmd: list, repo_path: str = ".") -> tuple:
+    """Run git command synchronously."""
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        return "", "Timeout"
+    except FileNotFoundError:
+        return "", "Git not found"
+    except Exception as e:
+        return "", str(e)
+
+
+@mcp.tool()
+def git_get_current_branch(repo_path: str = ".") -> str:
+    """Get the current git branch name."""
+    stdout, stderr = _run_git(["git", "rev-parse", "--abbrev-ref", "HEAD"], repo_path)
+    if "not a git repository" in stderr.lower() or "fatal" in stderr.lower():
+        return "Not a git repository"
+    return stdout.strip() or "HEAD"
+
+
+@mcp.tool()
+def git_get_branches(repo_path: str = ".") -> str:
+    """Get all local and remote git branches."""
+    stdout, stderr = _run_git(["git", "branch", "-a"], repo_path)
+    if "not a git repository" in stderr.lower():
+        return "Not a git repository"
+
+    local = []
+    remote = []
+    for line in stdout.strip().split("\n"):
+        line = line.strip().lstrip("*").strip()
+        if not line:
+            continue
+        if line.startswith("remotes/"):
+            remote.append(line.replace("remotes/", "", 1))
+        else:
+            local.append(line)
+
+    return "Local:\n" + "\n".join(f"  {b}" for b in local[:10]) + "\n\nRemote:\n" + "\n".join(f"  {b}" for b in remote[:10])
+
+
+@mcp.tool()
+def git_get_status(repo_path: str = ".") -> str:
+    """Get git working directory status."""
+    stdout, stderr = _run_git(["git", "status", "--short"], repo_path)
+    if "not a git repository" in stderr.lower():
+        return "Not a git repository"
+    return stdout.strip() or "Clean (no changes)"
+
+
+@mcp.tool()
+def git_get_diff(repo_path: str = ".", file_path: str = "") -> str:
+    """Get git diff for changes."""
+    cmd = ["git", "diff", "--no-color"]
+    if file_path:
+        cmd.append(file_path)
+    stdout, stderr = _run_git(cmd, repo_path)
+    if "not a git repository" in stderr.lower():
+        return "Not a git repository"
+    if not stdout.strip():
+        return "No changes"
+    output = stdout.strip()
+    if len(output) > 5000:
+        output = output[:5000] + "\n... (truncated)"
+    return output
+
+
+@mcp.tool()
+def git_get_recent_commits(repo_path: str = ".", count: int = 5) -> str:
+    """Get recent git commits."""
+    count = min(max(count, 1), 20)
+    stdout, stderr = _run_git(["git", "log", "--format=%h %s (%cr)", f"-{count}"], repo_path)
+    if "not a git repository" in stderr.lower():
+        return "Not a git repository"
+    return stdout.strip() or "No commits"
+
+
+@mcp.tool()
+def git_get_file_content(file_path: str, repo_path: str = ".", ref: str = "HEAD") -> str:
+    """Get file content from git repository."""
+    stdout, stderr = _run_git(["git", "show", f"{ref}:{file_path}"], repo_path)
+    if "not a git repository" in stderr.lower():
+        return "Not a git repository"
+    if stderr and "does not exist" in stderr.lower():
+        return f"File not found: {file_path}"
+    content = stdout.strip()
+    if len(content) > 10000:
+        content = content[:10000] + "\n\n... (truncated)"
+    return content
+
+
+@mcp.tool()
+def git_list_files(repo_path: str = ".", ref: str = "HEAD") -> str:
+    """List all files in the git repository."""
+    stdout, stderr = _run_git(["git", "ls-tree", "-r", "--name-only", ref], repo_path)
+    if "not a git repository" in stderr.lower():
+        return "Not a git repository"
+    files = [f.strip() for f in stdout.strip().split("\n") if f.strip()]
+    if not files:
+        return "No files"
+    result = f"Files ({len(files)} total, first 50):\n"
+    result += "\n".join(f"  {f}" for f in files[:50])
+    if len(files) > 50:
+        result += f"\n  ... and {len(files) - 50} more"
+    return result
+
+
+@mcp.tool()
+def git_get_repo_info(repo_path: str = ".") -> str:
+    """Get git repository information."""
+    info = []
+    stdout, stderr = _run_git(["git", "rev-parse", "--abbrev-ref", "HEAD"], repo_path)
+    if not stderr and stdout.strip():
+        info.append(f"Branch: {stdout.strip()}")
+
+    stdout, stderr = _run_git(["git", "config", "--get", "remote.origin.url"], repo_path)
+    if not stderr and stdout.strip():
+        info.append(f"Remote: {stdout.strip()}")
+
+    stdout, stderr = _run_git(["git", "rev-list", "--count", "HEAD"], repo_path)
+    if not stderr and stdout.strip():
+        info.append(f"Commits: {stdout.strip()}")
+
+    stdout, stderr = _run_git(["git", "log", "-1", "--format=%h %s (%cr)"], repo_path)
+    if not stderr and stdout.strip():
+        info.append(f"Latest: {stdout.strip()}")
+
+    if not info:
+        return "Not a git repository"
+    return "\n".join(info)
+
 
 # --------------------  ЗАПУСК СЕРВЕРА  --------------------
 def main():
