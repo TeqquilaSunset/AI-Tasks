@@ -5,28 +5,25 @@ MCP-сервер с погодой на основе FastMCP (современн
 """
 from __future__ import annotations
 
-import logging
 import os
 import sys
+import tempfile
 from typing import Any
 
+import docker
 import httpx
 import mcp.types as types
-from mcp.server.fastmcp import FastMCP
 from dotenv import load_dotenv
-import docker
-import tempfile
-import subprocess
+from mcp.server.fastmcp import FastMCP
 
-# --------------------  ЛОГИРОВАНИЕ  --------------------
-# Важно: пишем только в stderr для STDIO-based серверов
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s - %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-    handlers=[logging.StreamHandler(sys.stderr)]
-)
-log = logging.getLogger("weather-server")
+# Add src to path for imports
+sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), "src")))
+
+from src.utils import setup_logging
+
+# --------------------  LOGGING  --------------------
+# Important: only write to stderr for STDIO-based servers
+log = setup_logging("weather-server", output_stream="stderr")
 
 load_dotenv()
 

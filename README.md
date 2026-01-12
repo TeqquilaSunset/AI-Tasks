@@ -1,214 +1,359 @@
-# OpenAI-совместимый консольный клиент
+# AI Challenge Task 1 - OpenAI Compatible Chat Client
 
-Этот проект представляет собой консольного клиента для взаимодействия с OpenAI-совместимыми моделями. Программа позволяет пользователю вводить текстовые запросы и получать ответы от модели в режиме реального времени.
+Проект представляет собой консольный чат-клиент с интеграцией MCP (Model Context Protocol), RAG (Retrieval Augmented Generation) и поддержкой обработки PDF документов.
 
-## Основные возможности
+## [English](#english) | [Русский](#русский)
 
-- Поддержка диалога с OpenAI-совместимыми моделями.
-- Возможность ввода сообщений пользователем.
-- Вывод ответов модели.
-- Поддержка выхода из программы с помощью команды `quit`.
-- Возможность изменения температуры с помощью команды `temp x.x`
-- Отображение времени выполнения запроса и расхода токенов
-- **Новое:** Интеграция с RAG (Retrieval Augmented Generation) для работы с документами
-- **Новое:** Поддержка обработки PDF файлов и поиска по ним
-- **Новое:** Интеграция с векторной базой данных Qdrant
-- **Новое:** Поддержка GPU-оптимизации для обработки эмбеддингов
-- **Новое:** Асинхронная обработка для улучшения производительности
+---
 
-## Требования
+<a name="русский"></a>
+## Русский
 
-- Python 3.7 или выше
-- Установленные пакеты:
-  - `openai`
-  - `python-dotenv`
-  - `mcp`
-  - `httpx`
-  - `docker`
-  - `PyPDF2`
-  - `qdrant-client`
-  - `numpy`
-  - `requests`
-  - `aiohttp`
+### Основные возможности
 
-## Установка
+- **MCP интеграция**: Полная поддержка протокола Model Context Protocol
+  - STDIO-транспорт для локальных MCP серверов
+  - HTTP-транспорт для Docker MCP серверов
+  - Автоматическое обнаружение инструментов
+- **RAG поддержка**: Работа с векторной базой данных Qdrant
+  - Поиск по документам
+  - Реранкинг результатов
+  - Настраиваемый порог релевантности
+- **PDF обработка**: Пайплайн для индексации документов
+  - Синхронная и асинхронная (GPU-оптимизированная) версии
+  - Генерация эмбеддингов через Ollama
+  - Хранение в Qdrant
+- **Управление разговором**:
+  - Сохранение/загрузка истории
+  - Настройка температуры
+  - RAG команды
 
-1. Клонируйте репозиторий:
+### Структура проекта (после рефакторинга)
+
+```
+AI-Task-1/
+├── src/                          # Модульная архитектура
+│   ├── config.py                 # Конфигурация и константы
+│   ├── utils/                    # Общие утилиты
+│   │   ├── __init__.py
+│   │   ├── logging_config.py     # Настройка логирования
+│   │   ├── pdf_chunker.py        # Разбиение PDF на чанки
+│   │   ├── ollama_client.py      # Клиент для эмбеддингов
+│   │   └── qdrant_client.py      # Клиент векторной БД
+│   ├── services/                 # Бизнес-логика
+│   │   ├── __init__.py
+│   │   └── rag_service.py        # RAG сервис
+│   └── clients/                  # MCP клиенты
+│       ├── __init__.py
+│       ├── mcp_client.py         # STDIO MCP клиент
+│       └── docker_mcp_client.py  # Docker MCP клиент
+├── main.py                       # Главный чат-клиент (рефакторинг)
+├── mcp_server.py                 # MCP сервер с инструментами
+├── pdf_pipeline.py               # PDF пайплайн (синхронный)
+├── pdf_pipeline_async.py         # PDF пайплайн (асинхронный)
+├── run_pipeline_gpu.py           # GPU-оптимизированный запуск
+├── regular.py                    # Weather мониторинг агент
+├── test_rag_changes.py           # Тесты RAG
+├── requirements.txt              # Зависимости
+├── docker-compose.yml            # Docker конфигурация
+├── .env                          # Переменные окружения
+├── README.md                     # Этот файл
+├── Pipeline_README.md            # Документация PDF пайплайна
+└── GPU_SETUP.md                  # GPU настройки
+```
+
+### Установка
+
+1. **Клонирование репозитория**:
    ```bash
-   git clone https://github.com/yourusername/openai-console-client.git
-   cd openai-console-client
+   git clone <repo-url>
+   cd AI-Task-1
    ```
 
-2. Установите зависимости:
+2. **Установка зависимостей**:
    ```bash
    pip install -r requirements.txt
    ```
 
-3. Создайте файл `.env` в корне проекта и добавьте API-ключ:
+3. **Настройка окружения** (.env):
    ```env
-   OPENAI_API_KEY=your_openai_api_key_here
-   # или используйте существующий ZAI_API_KEY
-   ZAI_API_KEY=your_zai_api_key_here
-   # или настройте OpenAI-совместимый сервис
-   OPENAI_BASE_URL=https://your-openai-compatible-service.com/v1
-   MODEL_NAME=gpt-3.5-turbo  # или другая модель
-   OPEN_WEATHER=api_key
+   # OpenAI/LLM
+   OPENAI_API_KEY=your_key_here
+   OPENAI_BASE_URL=https://api.example.com/v1
+
+   # Weather API (для MCP сервера)
+   OPEN_WEATHER=your_openweather_api_key
+
+   # MCP Docker
+   DOCKER_MCP_HOST=localhost
+   DOCKER_MCP_PORT=9011
    ```
 
-## Использование
+4. **Запуск сервисов**:
+   - Qdrant: `docker run -p 6333:6333 qdrant/qdrant`
+   - Ollama: `ollama serve` (для RAG и PDF пайплайна)
 
-1. Запустите программу:
-   ```bash
-   python main.py
-   ```
+### Использование
 
-2. Введите свои сообщения. Для выхода введите `quit`.
-3. Для изменения температуры используйте команду `temp 0.7` (где 0.7 - значение температуры)
+#### Чат-клиент
 
-## Пример использования
-
-```
-==================================================
-ROBOT Чат-клиент с MCP инструментами
-Команды: quit/exit, save <имя>, load <имя>, temp <0-2>, clear, print
-RAG команды: /rag (вкл/выкл), /rag <вопрос> (вопрос с RAG), /rag rerank (вкл/выкл реранкер), /rag threshold <значение> (установить порог)
-==================================================
-
-USER Вы: Привет, как дела?
-
-THERMOMETER Температура установлена: 0.7
-ASSISTANT Ассистент: Привет! У меня всё отлично, спасибо. Как у тебя?
-
-TIME Время: 1.25с | Инструментов: 2 (STDIO: 1, Docker: 1)
-
-USER Вы: temp 0.5
-THERMOMETER Температура установлена: 0.5
-
-USER Вы: Как дела?
-THERMOMETER Температура установлена: 0.5
-ASSISTANT Ассистент: У меня всё стабильно, спасибо за интерес. Как могу помочь вам сегодня?
-
-TIME Время: 0.87с | Инструментов: 2 (STDIO: 1, Docker: 1)
-
-USER Вы: quit
-GOODBYE До свидания!
+```bash
+python main.py
 ```
 
-## Дополнительные компоненты
+**Команды чата**:
+- `quit` / `exit` - выход
+- `save <имя>` - сохранить разговор
+- `load <имя>` - загрузить разговор
+- `temp <0-2>` - установить температуру
+- `clear` - очистить историю
+- `print` - показать историю
 
-### MCP Сервер и Клиент
+**RAG команды**:
+- `/rag` - вкл/выкл RAG режим
+- `/rag <вопрос>` - задать вопрос с RAG
+- `/rag rerank` - вкл/выкл реранкер
+- `/rag threshold <0-1>` - установить порог
 
-Проект теперь включает полную интеграцию MCP (Model Context Protocol):
-- MCP сервер с инструментами погоды и другими утилитами
-- MCP клиент, интегрированный в основной чат
-- Поддержка Docker MCP сервера для распределенных инструментов
-
-#### Использование MCP интеграции
-
-1. Запустите главный чат-клиент:
-   ```bash
-   python main.py
-   ```
-
-2. При запуске клиент автоматически подключается к MCP серверу и показывает доступные инструменты:
-   - `stub-tool`: Простой инструмент для демонстрации, возвращает фиктивный ответ
-   - `get-weather`: Получает текущую погоду для указанного города с использованием OpenWeatherMap API
-   - `get_weather_forecast`: Получает прогноз погоды на несколько дней
-   - `convert_temperature`: Конвертирует температуру между различными единицами измерения
-   - `save_weather_data`: Сохраняет погодные данные в JSON файл
-   - `execute_python_code`: Выполняет Python код в Docker контейнере
-
-3. Для вызова инструментов используйте формат в чате:
-   - `get-weather Париж` - получить погоду для Парижа
-   - `get-weather London` - получить погоду для Лондона
-   - `stub-tool test` - вызвать заглушку инструмента с тестовым входом
-   - `execute_python_code print('Hello from Docker')` - выполнить Python код в Docker
-
-Для работы инструментов `get-weather` и `get_weather_forecast` необходим API-ключ OpenWeatherMap, указанный в переменной окружения `OPEN_WEATHER` в файле `.env`.
-
-#### Использование MCP сервера отдельно
-
-Если вы хотите запустить MCP сервер отдельно:
-   ```bash
-   python mcp_server.py
-   ```
-
-Сервер реализует протокол Model Context Protocol и может взаимодействовать с совместимыми MCP клиентами.
-
-### RAG (Retrieval Augmented Generation) и PDF обработка
-
-Проект включает мощную систему RAG для работы с документами:
-
-#### Основные возможности RAG:
-- Поиск по векторной базе данных Qdrant
-- Генерация эмбеддингов с помощью Ollama
-- Поддержка реранкинга результатов
-- Настройка порога релевантности
-- Интеграция с чатом для ответов на основе документов
-
-#### Команды RAG:
-- `/rag` - включить/выключить режим RAG
-- `/rag <вопрос>` - задать вопрос с использованием RAG
-- `/rag rerank` - включить/выключить реранкер
-- `/rag threshold 0.5` - установить порог релевантности (0-1)
-
-#### Запуск пайплайна обработки PDF:
-Для подготовки документов к поиску:
+#### PDF индексация
 
 ```bash
 # Синхронная версия
-python pdf_pipeline.py --pdf_path path/to/your/file.pdf
+python pdf_pipeline.py --pdf_path document.pdf
 
-# Асинхронная версия (рекомендуется для GPU)
-python pdf_pipeline_async.py --pdf_path path/to/your/file.pdf --max_concurrent 10
+# Асинхронная (GPU оптимизированная)
+python pdf_pipeline_async.py --pdf_path document.pdf --max_concurrent 10
 
-# Оптимизированная версия для GPU
-python run_pipeline_gpu.py --pdf_path path/to/your/file.pdf --use_async --max_concurrent 15
+# GPU скрипт
+python run_pipeline_gpu.py --pdf_path document.pdf --use_async --max_concurrent 15
 ```
 
-#### Параметры пайплайна:
-- `--pdf_path` (обязательный): Путь к обрабатываемому PDF файлу
-- `--chunk_size`: Размер чанка текста (по умолчанию 1024/2048 для GPU)
-- `--overlap`: Перекрытие между чанками (по умолчанию 50)
-- `--collection_name`: Название коллекции в Qdrant (по умолчанию pdf_chunks)
-- `--embedding_model`: Используемая модель Ollama (по умолчанию qwen3-embedding:latest)
-- `--ollama_host`: Адрес API Ollama (по умолчанию http://localhost:11434)
-- `--max_concurrent` (для асинхронной версии): Количество одновременных запросов (по умолчанию 10, рекомендуется 15 для RTX 4070)
+**Параметры**:
+- `--pdf_path` - путь к PDF (обязательно)
+- `--chunk_size` - размер чанка (по умолчанию 1024)
+- `--overlap` - перекрытие (по умолчанию 50)
+- `--collection_name` - коллекция Qdrant (по умолчанию pdf_chunks)
+- `--embedding_model` - модель Ollama (по умолчанию qwen3-embedding:latest)
+- `--ollama_host` - URL Ollama (по умолчанию http://localhost:11434)
+- `--max_concurrent` - кол-во параллельных запросов (по умолчанию 10)
 
-### Настройка GPU для максимальной производительности
+### MCP инструменты
 
-Для максимальной производительности при генерации эмбеддингов с помощью Ollama и вашей видеокарты NVIDIA RTX 4070:
+Доступные инструменты при запуске чата:
 
-1. Установите CUDA Toolkit с официального сайта NVIDIA
-2. Убедитесь, что версия драйвера вашей видеокарты поддерживает устанавливаемую версию CUDA
-3. Запустите Ollama с настройками, оптимизированными под вашу видеокарту:
+- `get_weather` - текущая погода для города
+- `get_weather_forecast` - прогноз на несколько дней
+- `convert_temperature` - конвертация температуры
+- `save_weather_data` - сохранение погодных данных
+- `execute_python_code` - выполнение Python в Docker
+- `stub_tool` - заглушка для тестов
+
+### Изменения после рефакторинга
+
+#### Архитектурные улучшения:
+
+1. **Модульная структура**: Код разделен на логические модули
+   - `src/utils/` - переиспользуемые утилиты
+   - `src/services/` - бизнес-логика
+   - `src/clients/` - клиенты внешних сервисов
+   - `src/config.py` - централизованная конфигурация
+
+2. **Устранение дублирования**:
+   - Единый модуль логирования
+   - Общий класс PDFChunker
+   - Общий клиент Ollama
+   - Общий клиент Qdrant
+
+3. **Улучшенная читаемость**:
+   - Добавлены type hints
+   - Docstrings на английском
+   - Последовательное именование
+
+4. **Конфигурация**:
+   - Все константы в `src/config.py`
+   - Централизованная настройка параметров
+
+#### Размер файлов:
+
+| Файл | До | После |
+|------|-----|-------|
+| main.py | ~1113 строк | ~587 строк |
+| pdf_pipeline.py | ~312 строк | ~163 строки |
+| pdf_pipeline_async.py | ~338 строк | ~181 строка |
+
+---
+
+<a name="english"></a>
+## English
+
+### Features
+
+- **MCP Integration**: Full Model Context Protocol support
+  - STDIO transport for local MCP servers
+  - HTTP transport for Docker MCP servers
+  - Automatic tool discovery
+- **RAG Support**: Qdrant vector database integration
+  - Document search
+  - Result reranking
+  - Configurable relevance threshold
+- **PDF Processing**: Document indexing pipeline
+  - Synchronous and asynchronous (GPU-optimized) versions
+  - Ollama embedding generation
+  - Qdrant storage
+- **Conversation Management**:
+  - Save/load history
+  - Temperature control
+  - RAG commands
+
+### Project Structure (after refactoring)
+
+```
+AI-Task-1/
+├── src/                          # Modular architecture
+│   ├── config.py                 # Configuration and constants
+│   ├── utils/                    # Shared utilities
+│   │   ├── __init__.py
+│   │   ├── logging_config.py     # Logging setup
+│   │   ├── pdf_chunker.py        # PDF chunking
+│   │   ├── ollama_client.py      # Embedding client
+│   │   └── qdrant_client.py      # Vector DB client
+│   ├── services/                 # Business logic
+│   │   ├── __init__.py
+│   │   └── rag_service.py        # RAG service
+│   └── clients/                  # MCP clients
+│       ├── __init__.py
+│       ├── mcp_client.py         # STDIO MCP client
+│       └── docker_mcp_client.py  # Docker MCP client
+├── main.py                       # Main chat client (refactored)
+├── mcp_server.py                 # MCP server with tools
+├── pdf_pipeline.py               # PDF pipeline (sync)
+├── pdf_pipeline_async.py         # PDF pipeline (async)
+├── run_pipeline_gpu.py           # GPU-optimized runner
+├── regular.py                    # Weather monitoring agent
+├── test_rag_changes.py           # RAG tests
+├── requirements.txt              # Dependencies
+├── docker-compose.yml            # Docker configuration
+├── .env                          # Environment variables
+├── README.md                     # This file
+├── Pipeline_README.md            # PDF pipeline documentation
+└── GPU_SETUP.md                  # GPU setup guide
+```
+
+### Installation
+
+1. **Clone repository**:
+   ```bash
+   git clone <repo-url>
+   cd AI-Task-1
+   ```
+
+2. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Configure environment** (.env):
+   ```env
+   # OpenAI/LLM
+   OPENAI_API_KEY=your_key_here
+   OPENAI_BASE_URL=https://api.example.com/v1
+
+   # Weather API (for MCP server)
+   OPEN_WEATHER=your_openweather_api_key
+
+   # MCP Docker
+   DOCKER_MCP_HOST=localhost
+   DOCKER_MCP_PORT=9011
+   ```
+
+4. **Start services**:
+   - Qdrant: `docker run -p 6333:6333 qdrant/qdrant`
+   - Ollama: `ollama serve` (for RAG and PDF pipeline)
+
+### Usage
+
+#### Chat Client
 
 ```bash
-# Установите переменные окружения для использования GPU
-set OLLAMA_NUM_PARALLEL=10
-set OLLAMA_MAX_LOADED_MODELS=2
-set OLLAMA_NOHISTORY=1
-
-# Если вы хотите ограничить использование памяти (например, для 12GB VRAM)
-# set OLLAMA_GPU_MEMORY=10240
-
-# Запустите Ollama
-ollama serve
+python main.py
 ```
 
-4. Используйте асинхронную версию пайплайна для лучшего использования GPU:
+**Chat Commands**:
+- `quit` / `exit` - exit
+- `save <name>` - save conversation
+- `load <name>` - load conversation
+- `temp <0-2>` - set temperature
+- `clear` - clear history
+- `print` - show history
+
+**RAG Commands**:
+- `/rag` - toggle RAG mode
+- `/rag <question>` - ask with RAG
+- `/rag rerank` - toggle reranker
+- `/rag threshold <0-1>` - set threshold
+
+#### PDF Indexing
+
 ```bash
-python pdf_pipeline_async.py --pdf_path your_file.pdf --max_concurrent 10
+# Synchronous version
+python pdf_pipeline.py --pdf_path document.pdf
+
+# Asynchronous (GPU optimized)
+python pdf_pipeline_async.py --pdf_path document.pdf --max_concurrent 10
+
+# GPU script
+python run_pipeline_gpu.py --pdf_path document.pdf --use_async --max_concurrent 15
 ```
 
-### Дополнительные команды чата
+**Parameters**:
+- `--pdf_path` - path to PDF (required)
+- `--chunk_size` - chunk size (default: 1024)
+- `--overlap` - overlap (default: 50)
+- `--collection_name` - Qdrant collection (default: pdf_chunks)
+- `--embedding_model` - Ollama model (default: qwen3-embedding:latest)
+- `--ollama_host` - Ollama URL (default: http://localhost:11434)
+- `--max_concurrent` - concurrent requests (default: 10)
 
-- `quit` или `exit` - выход из программы
-- `clear` - очистка истории разговора
-- `print` - вывод истории разговора
-- `save <имя>` - сохранение разговора в файл
-- `load <имя>` - загрузка разговора из файла
-- `temp <0-2>` - изменение температуры модели
-- `/rag` - включение/выключение режима RAG
-- `/rag rerank` - включение/выключение реранкера
-- `/rag threshold <значение>` - установка порога релевантности
+### MCP Tools
+
+Available tools when running chat:
+
+- `get_weather` - current weather for city
+- `get_weather_forecast` - multi-day forecast
+- `convert_temperature` - temperature conversion
+- `save_weather_data` - save weather data
+- `execute_python_code` - execute Python in Docker
+- `stub_tool` - stub for testing
+
+### Changes After Refactoring
+
+#### Architectural Improvements:
+
+1. **Modular Structure**: Code divided into logical modules
+   - `src/utils/` - reusable utilities
+   - `src/services/` - business logic
+   - `src/clients/` - external service clients
+   - `src/config.py` - centralized configuration
+
+2. **Eliminated Duplication**:
+   - Single logging module
+   - Shared PDFChunker class
+   - Shared Ollama client
+   - Shared Qdrant client
+
+3. **Improved Readability**:
+   - Added type hints
+   - English docstrings
+   - Consistent naming
+
+4. **Configuration**:
+   - All constants in `src/config.py`
+   - Centralized parameter settings
+
+#### File Sizes:
+
+| File | Before | After |
+|------|--------|-------|
+| main.py | ~1113 lines | ~587 lines |
+| pdf_pipeline.py | ~312 lines | ~163 lines |
+| pdf_pipeline_async.py | ~338 lines | ~181 lines |

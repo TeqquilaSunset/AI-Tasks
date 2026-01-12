@@ -1,130 +1,133 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-OpenAI-совместимый чат-клиент с MCP-инструментами
-(современный подход с FastMCP и улучшенной архитектурой)
+OpenAI-compatible chat client with MCP tools integration.
+Refactored to use modular architecture with separate services.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+import re
 import sys
 import typing as tp
-from contextlib import AsyncExitStack
 from datetime import datetime
-from pathlib import Path
 
 import httpx
 import openai
 from dotenv import load_dotenv
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
 
-# Дополнительные импорты для RAG
-import requests
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import PointStruct, VectorParams, Distance
+# Add src to path for imports
+sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), "src")))
+
+from src.clients import DockerMCPClient, MCPClient
+from src.config import (
+    DEFAULT_MODEL,
+    DEFAULT_TEMPERATURE,
+    DOCKER_MCP_HOST,
+    DOCKER_MCP_PORT,
+    SAVE_DIR,
+    SERVER_SCRIPT,
+    SYSTEM_PROMPT,
+)
+from src.services import RAGService
+from src.utils import setup_logging
 
 load_dotenv()
 
-# --------------------  КОНФИГУРАЦИЯ  --------------------
-SYSTEM_PROMPT = "Ты помощник, который помогает с любыми вопросами. Ты можешь использовать доступные инструменты для получения информации. Используй только те инструменты которые у тебя есть. Если существующих инструментов не хватает не напиши пользователю об этом. Не придумывай новые иснтурменты. Вызывай инструменты в tool_calls"
-SAVE_DIR = Path("saves")
-SAVE_DIR.mkdir(exist_ok=True)
+log = setup_logging("mcp-client")
 
-BASE_DIR = Path(__file__).resolve().parent
-SERVER_SCRIPT = str(BASE_DIR / "mcp_server.py")
-DOCKER_MCP_HOST = os.getenv("DOCKER_MCP_HOST", "localhost")
-DOCKER_MCP_PORT = int(os.getenv("DOCKER_MCP_PORT", "9011"))  # Updated to 9011 for MCP gateway as per new docker-compose.yml
-DOCKER_MCP_URL = f"http://{DOCKER_MCP_HOST}:{DOCKER_MCP_PORT}/mcp"
 
-# --------------------  ЛОГИРОВАНИЕ  --------------------
-import logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s - %(name)s: %(message)s",
-    handlers=[logging.StreamHandler(sys.stderr)]
-)
-log = logging.getLogger("mcp-client")
-
-# --------------------  УТИИЛИТЫ  --------------------
+# -------------------- UTILITIES --------------------
 def build_openai_client() -> openai.AsyncOpenAI:
-    """Создает клиент OpenAI с настройками из окружения."""
+    """Build OpenAI client with environment settings."""
     key = os.getenv("OPENAI_API_KEY")
     base = os.getenv("OPENAI_BASE_URL")
     verify = os.getenv("OPENAI_VERIFY_SSL", "true").lower() != "false"
     http = httpx.AsyncClient(verify=verify)
     return openai.AsyncOpenAI(api_key=key, base_url=base, http_client=http)
 
+
 def save_conversation(history: tp.List[dict], name: str | None = None) -> str:
-    """Сохраняет историю разговора в JSON файл."""
-    name = f"conversation_{datetime.now():%Y%m%d_%H%M%S}.json" if name is None else name
+    """Save conversation history to JSON file."""
+    name = (
+        f"conversation_{datetime.now():%Y%m%d_%H%M%S}.json"
+        if name is None
+        else name
+    )
     if not name.endswith(".json"):
         name += ".json"
 
     path = SAVE_DIR / name
     try:
         path.write_text(json.dumps(history, ensure_ascii=False, indent=2))
-        log.info(f"Разговор сохранен в {path}")
+        log.info(f"Conversation saved to {path}")
         return str(path)
     except Exception as exc:
-        error_msg = f"Ошибка при сохранении: {exc}"
+        error_msg = f"Error saving: {exc}"
         log.error(error_msg)
         return error_msg
 
+
 def load_conversation(name: str) -> tp.Tuple[tp.List[dict] | None, str]:
-    """Загружает историю разговора из файла."""
+    """Load conversation history from file."""
     try:
         if name.isdigit():
-            # Загрузка по номеру
+            # Load by number
             files = sorted(SAVE_DIR.glob("conversation_*.json"), reverse=True)
             idx = int(name) - 1
             if 0 <= idx < len(files):
                 path = files[idx]
                 return json.loads(path.read_text()), str(path)
-            return None, "Неверный номер сохранения."
+            return None, "Invalid save number."
 
-        # Загрузка по имени
-        path = SAVE_DIR / (name if name.endswith(".json") else f"{name}.json")
+        # Load by name
+        path = SAVE_DIR / (
+            name if name.endswith(".json") else f"{name}.json"
+        )
         if path.exists():
             return json.loads(path.read_text()), str(path)
-        return None, f"Файл {path} не найден."
+        return None, f"File {path} not found."
 
     except Exception as exc:
-        error_msg = f"Ошибка при загрузке: {exc}"
+        error_msg = f"Error loading: {exc}"
         log.error(error_msg)
         return None, error_msg
 
+
 def list_saved_conversations() -> str:
-    """Возвращает список сохраненных разговоров."""
+    """Return list of saved conversations."""
     files = sorted(SAVE_DIR.glob("conversation_*.json"), reverse=True)
     if not files:
-        return "Нет сохранённых разговоров."
+        return "No saved conversations."
 
-    lines = ["Сохранённые разговоры:", "=" * 40]
+    lines = ["Saved conversations:", "=" * 40]
     for idx, fp in enumerate(files, 1):
-        # Извлекаем дату из имени файла
+        # Extract date from filename
         ts_match = fp.stem.replace("conversation_", "")
         try:
             dt = datetime.strptime(ts_match, "%Y%m%d_%H%M%S")
             nice_date = dt.strftime("%Y-%m-%d %H:%M:%S")
-        except:
+        except Exception:
             nice_date = fp.stem
 
         lines.append(f"{idx}. {nice_date} – {fp.name}")
 
     return "\n".join(lines)
 
-async def create_summary(cli: openai.AsyncOpenAI, model: str, history: tp.List[dict]) -> str:
-    """Создает краткое резюме разговора."""
+
+async def create_summary(
+    cli: openai.AsyncOpenAI, model: str, history: tp.List[dict]
+) -> str:
+    """Create a brief summary of the conversation."""
     msgs = [m for m in history if m["role"] in ("user", "assistant")]
     if not msgs:
-        return "Нет истории для резюме."
+        return "No history to summarize."
 
-    text = "Пожалуйста, создай краткое резюме следующего диалога. Выдели основные темы и детали:\n\n"
+    text = "Please create a brief summary of the following dialogue. Highlight main topics and details:\n\n"
     for msg in msgs:
-        role = "Пользователь" if msg["role"] == "user" else "AI"
+        role = "User" if msg["role"] == "user" else "AI"
         text += f"{role}: {msg['content']}\n\n"
 
     try:
@@ -134,672 +137,151 @@ async def create_summary(cli: openai.AsyncOpenAI, model: str, history: tp.List[d
             temperature=0.3,
             max_tokens=512,
         )
-        return resp.choices[0].message.content or "Не удалось создать резюме."
+        return resp.choices[0].message.content or "Failed to create summary."
     except Exception as exc:
-        error_msg = f"Ошибка при создании резюме: {exc}"
+        error_msg = f"Error creating summary: {exc}"
         log.error(error_msg)
         return error_msg
 
-# --------------------  RAG СЕРВИС  --------------------
-class RAGService:
-    """Сервис для работы с RAG (Retrieval Augmented Generation)"""
 
-    def __init__(self,
-                 collection_name: str = "pdf_chunks",
-                 embedding_model: str = "qwen3-embedding:latest",
-                 ollama_host: str = "http://localhost:11434",
-                 qdrant_host: str = "localhost",
-                 qdrant_port: int = 6333):
-        self.collection_name = collection_name
-        self.embedding_model = embedding_model
-        self.ollama_host = ollama_host
-        self.qdrant_client = QdrantClient(host=qdrant_host, port=qdrant_port)
-        self.reranker_enabled = False  # По умолчанию реранкер выключен
-        self.relevance_threshold = 0.1  # Порог релевантности по умолчанию
-        self.reranker_model = "dengcao/Qwen3-Reranker-8B:Q3_K_M"  # Модель реранкера
-
-    def generate_embedding(self, text: str) -> list[float]:
-        """Генерация эмбеддинга для текста через Ollama"""
-        try:
-            response = requests.post(
-                f"{self.ollama_host}/api/embeddings",
-                headers={"Content-Type": "application/json"},
-                json={
-                    "model": self.embedding_model,
-                    "prompt": text
-                },
-                timeout=30
-            )
-            response.raise_for_status()
-
-            result = response.json()
-            embedding = result.get("embedding")
-
-            if embedding is None:
-                raise ValueError("Ollama не вернул эмбеддинг")
-
-            return embedding
-        except requests.exceptions.RequestException as e:
-            log.error(f"Ошибка при запросе к Ollama: {e}")
-            raise
-        except Exception as e:
-            log.error(f"Ошибка при генерации эмбеддинга: {e}")
-            raise
-
-    def search_similar(self, query: str, top_k: int = 5) -> list[dict]:
-        """Поиск похожих документов по запросу"""
-        try:
-            log.info(f"RAG: Отправка запроса в векторную базу данных - Запрос: '{query[:50]}...', top_k: {top_k}")
-
-            query_embedding = self.generate_embedding(query)
-            log.info(f"RAG: Сгенерирован эмбеддинг длиной {len(query_embedding) if query_embedding else 0} для запроса")
-
-            results = self.qdrant_client.query_points(
-                collection_name=self.collection_name,
-                query=query_embedding,
-                limit=top_k
-            )
-
-            # Handle the return value based on QdrantClient version
-            # The query_points method returns a QueryResponse object in newer versions
-            from qdrant_client.http.models import QueryResponse
-            if isinstance(results, QueryResponse):
-                # Extract the points from the response object
-                points = results.points
-            elif isinstance(results, tuple):
-                # If it returns a tuple, the actual results are likely the first element
-                points = results[0] if len(results) > 0 else []
-            elif hasattr(results, '__iter__') and not isinstance(results, (str, bytes)):
-                # If it's already iterable (like a list)
-                points = results
-            else:
-                # Fallback
-                points = []
-
-            log.info(f"RAG: Получено {len(points)} результатов из векторной базы данных")
-
-            similar_docs = []
-            for i, result in enumerate(points):
-                # Check if result has the expected attributes
-                score = getattr(result, 'score', 0)
-                payload = getattr(result, 'payload', {})
-
-                doc_info = {
-                    "score": score,
-                    "payload": payload,
-                    "text": payload.get("text", "") if isinstance(payload, dict) else "",
-                    "full_text": payload.get("full_text", "") if isinstance(payload, dict) else "",
-                    "source_document": payload.get("source_document", "") if isinstance(payload, dict) else ""  # Добавляем имя исходного документа
-                }
-
-                # Логируем информацию о документе, включая источник
-                source_info = f" (Источник: {doc_info['source_document']})" if doc_info['source_document'] else ""
-                log.info(f"RAG: Результат #{i+1} - Релевантность: {score:.3f}, Текст: '{doc_info['text'][:100]}...'{source_info}")
-                similar_docs.append(doc_info)
-
-            # Применяем реранкер, если он включен
-            if self.reranker_enabled and similar_docs:
-                log.info(f"RAG: Применение реранкера к {len(similar_docs)} документам")
-                similar_docs = self.rerank_documents(query, similar_docs)
-                log.info(f"RAG: После реранкинга осталось {len(similar_docs)} документов")
-
-            # Применяем фильтрацию по порогу релевантности независимо от реранкера
-            filtered_docs = [doc for doc in similar_docs if doc["score"] >= self.relevance_threshold]
-            log.info(f"RAG: После фильтрации по порогу {self.relevance_threshold} осталось {len(filtered_docs)} документов")
-
-            return filtered_docs
-        except Exception as e:
-            log.error(f"Ошибка при поиске похожих документов: {e}")
-            return []
-
-    def rerank_documents(self, query: str, documents: list[dict]) -> list[dict]:
-        """Реранкинг документов с использованием упрощенного алгоритма (для производительности)"""
-        try:
-            log.info(f"RAG: Запуск реранкера для {len(documents)} документов")
-
-            # Для улучшения производительности используем упрощенный алгоритм реранкинга
-            # вместо вызова модели для каждого документа
-
-            reranked_docs = []
-            for i, doc in enumerate(documents):
-                original_score = doc["score"]
-                text_content = doc.get("text", "") or doc.get("full_text", "") or str(doc.get("payload", ""))
-
-                # Простой алгоритм реранкинга:
-                # 1. Длина текста (длинные релевантные тексты могут быть более ценными)
-                text_length_score = min(len(text_content) / 1000, 0.3)  # Максимум +0.3 за длину
-
-                # 2. Совпадение слов из запроса в тексте
-                query_words = set(query.lower().split())
-                text_words = set(text_content.lower().split())
-                overlap_score = len(query_words.intersection(text_words)) / max(len(query_words), 1) * 0.4  # Максимум +0.4 за совпадение
-
-                # 3. Комбинируем оригинальный скор с новыми метриками
-                reranked_score = original_score + text_length_score + overlap_score
-                # Ограничиваем максимальный скор значением 1.0
-                reranked_score = min(reranked_score, 1.0)
-
-                # Обновляем score документа
-                updated_doc = doc.copy()
-                updated_doc["score"] = reranked_score
-                reranked_docs.append(updated_doc)
-
-            # Сортируем по новому скору
-            reranked_docs.sort(key=lambda x: x["score"], reverse=True)
-
-            # Применяем порог фильтрации
-            filtered_docs = [doc for doc in reranked_docs if doc["score"] >= self.relevance_threshold]
-
-            log.info(f"RAG: После реранкинга и фильтрации осталось {len(filtered_docs)} документов")
-
-            # Логирование результатов реранкинга
-            for i, doc in enumerate(filtered_docs):
-                log.info(f"RAG: Реранк # {i+1} - Релевантность: {doc['score']:.3f}, Текст: '{doc['text'][:100]}...'")
-
-            return filtered_docs
-
-        except Exception as e:
-            log.error(f"Ошибка при реранкинге документов: {e}")
-            # Возвращаем оригинальные документы, если реранкинг не удался
-            return [doc for doc in documents if doc["score"] >= self.relevance_threshold]
-
-    def toggle_reranker(self) -> bool:
-        """Переключение состояния реранкера"""
-        self.reranker_enabled = not self.reranker_enabled
-        status = "включен" if self.reranker_enabled else "выключен"
-        log.info(f"RAG: Реранкер {status}")
-        return self.reranker_enabled
-
-    def set_relevance_threshold(self, threshold: float) -> float:
-        """Установка порога релевантности"""
-        self.relevance_threshold = max(0.0, min(1.0, threshold))  # Ограничиваем в диапазоне [0, 1]
-        log.info(f"RAG: Установлен порог релевантности: {self.relevance_threshold}")
-        return self.relevance_threshold
-
-    def get_rag_response(self, query: str, top_k: int = 10) -> str:
-        """Получение ответа с использованием RAG"""
-        try:
-            # Поиск релевантных чанков
-            similar_docs = self.search_similar(query, top_k)
-
-            if not similar_docs:
-                # Если не найдено документов, просто возвращаем оригинальный запрос
-                log.info("Не найдено релевантных документов, возвращаем оригинальный запрос")
-                return query
-
-            # Объединение найденных документов с вопросом
-            # Включаем документы с содержимым и без, чтобы LLM понимал контекст
-            context_parts = []
-            for i, doc in enumerate(similar_docs):
-                text_content = doc['text'] or doc['full_text'] or (str(doc['payload']) if doc['payload'] else "Документ без текстового содержимого")
-                source_info = f" (Источник: {doc['source_document']})" if doc['source_document'] else ""
-                context_parts.append(f"Контекстный документ #{i+1}{source_info} (релевантность: {doc['score']:.3f}): {text_content}")
-
-            context = "\n\n".join(context_parts)
-            rag_prompt = f"На основе следующей информации ответь на вопрос:\n\n{context}\n\nВопрос: {query}"
-
-            log.info(f"RAG: Найдено {len(similar_docs)} документов, длина контекста: {len(rag_prompt)} символов")
-            return rag_prompt
-        except Exception as e:
-            log.error(f"Ошибка при генерации RAG ответа: {e}")
-            # В случае ошибки возвращаем оригинальный запрос
-            return query
-
-# --------------------  MCP КЛИЕНТ  --------------------
-class MCPClient:
-    """Современный MCP клиент с улучшенным управлением ресурсами."""
-
-    def __init__(self) -> None:
-        self.session: ClientSession | None = None
-        self.exit_stack = AsyncExitStack()
-        self.tools: list[dict] = []
-        self._running = False
-
-    async def connect_to_server(self, server_script_path: str) -> None:
-        """Подключается к MCP серверу."""
-        log.info(f"Подключение к серверу: {server_script_path}")
-
-        if not Path(server_script_path).exists():
-            raise FileNotFoundError(f"Сервер не найден: {server_script_path}")
-
-        # Параметры для запуска сервера
-        server_params = StdioServerParameters(
-            command=sys.executable,
-            args=[server_script_path],
-            env={**os.environ}
-        )
-
-        # Создаем транспорт и сессию через контекстный менеджер
-        stdio_transport = await self.exit_stack.enter_async_context(
-            stdio_client(server_params)
-        )
-
-        self.session = await self.exit_stack.enter_async_context(
-            ClientSession(
-                stdio_transport[0],
-                stdio_transport[1],
-                client_info={"name": "mcp-client", "version": "1.0.0"}
-            )
-        )
-
-        # Инициализируем сессию
-        await self.session.initialize()
-
-        # Получаем список инструментов
-        tools_result = await self.session.list_tools()
-        self.tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "parameters": tool.inputSchema
-                }
-            }
-            for tool in (tools_result.tools if tools_result else [])
-        ]
-
-        self._running = True
-        log.info(f"Подключено к серверу. Доступно инструментов: {len(self.tools)}")
-
-        if self.tools:
-            for tool in self.tools:
-                log.info(f"  - {tool['function']['name']}: {tool['function']['description']}")
-
-    async def call_tool(self, name: str, arguments: dict) -> str:
-        """Вызывает инструмент MCP сервера."""
-        if not self._running or not self.session:
-            return "[Ошибка] Сервер не подключен"
-
-        try:
-            result = await self.session.call_tool(name, arguments)
-
-            # Объединяем все текстовые блоки в один ответ
-            text_parts = []
-            for block in result.content or []:
-                if hasattr(block, 'text'):
-                    text_parts.append(block.text)
-
-            return "\n".join(text_parts) if text_parts else "Инструмент выполнен без результата"
-
-        except Exception as exc:
-            error_msg = f"Ошибка вызова инструмента {name}: {exc}"
-            log.error(error_msg)
-            return f"[Ошибка] {error_msg}"
-
-    async def cleanup(self) -> None:
-        """Освобождает ресурсы."""
-        if self._running:
-            self._running = False
-            await self.exit_stack.aclose()
-            log.info("Ресурсы MCP клиента освобождены")
-
-    @property
-    def available_tools(self) -> list[dict]:
-        """Возвращает список доступных инструментов."""
-        return self.tools
-
-# --------------------  DOCKER MCP КЛИЕНТ  --------------------
-class DockerMCPClient:
-    """Клиент для подключения к MCP серверу, работающему в Docker на порту 8002."""
-
-    def __init__(self) -> None:
-        self.tools: list[dict] = []
-        self._connected = False
-        # Use the correct endpoint for streamableHttp protocol
-        self.mcp_url = DOCKER_MCP_URL  # Use the configured URL directly
-        self.base_url = f"http://{DOCKER_MCP_HOST}:{DOCKER_MCP_PORT}"
-        self.health_url = f"{self.base_url}/healthz"
-        self.session = None
-        self._tools_discovered = False
-        self._sse_task = None
-
-    async def connect_to_server(self) -> None:
-        """Подключается к Docker MCP серверу по HTTP с использованием streamableHttp."""
-        log.info(f"Подключение к Docker MCP серверу: {self.mcp_url}")
-
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                # Check if the server is healthy first
-                try:
-                    health_response = await client.get(self.health_url)
-                    log.info(f"Health check: {self.health_url} -> {health_response.status_code}")
-                except Exception:
-                    log.warning(f"Не удалось проверить health endpoint: {self.health_url}")
-
-                # For streamableHttp protocol, we should directly try to get tools via POST
-                # with proper headers following the MCP specification
-                headers = {
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",  # Required by streamableHttp
-                    # MCP protocol headers
-                    "MCP-Version": "2024-11-05",
-                    "Protocol-Version": "2024-11-05",
-                    # Some implementations might expect specific headers
-                }
-
-                # According to error message, server expects JSON-RPC 2.0 format
-                payload = {
-                    "jsonrpc": "2.0",
-                    "method": "tools/list",
-                    "params": {},
-                    "id": str(hash("tools_list_request"))[:8]  # Use a unique ID for JSON-RPC
-                }
-
-                # Post the request to get tools list
-                tools_response = await client.post(
-                    self.mcp_url,
-                    json=payload,
-                    headers=headers
-                )
-
-                log.info(f"Tools list request to {self.mcp_url} -> {tools_response.status_code}")
-
-                if tools_response.status_code == 200:
-                    # For streamableHttp, we need to handle the SSE response
-                    await self._process_sse_response(tools_response.text)
-                    self._connected = True  # Server is accessible
-                elif tools_response.status_code in [400, 404, 405]:
-                    # 400 Bad Request might mean the server is available but request format is wrong
-                    # 404: endpoint not found
-                    # 405: method not allowed
-                    # In all these cases, the server is responding, so we consider it accessible
-                    self._connected = True
-                    log.info(f"Сервер streamableHttp доступен (статус: {tools_response.status_code}), но не удалось получить инструменты")
-                else:
-                    log.warning(f"MCP endpoint недоступен: {self.mcp_url}, статус: {tools_response.status_code}")
-
-        except httpx.ConnectError:
-            log.warning(f"Не удается подключиться к Docker MCP серверу: {self.base_url}")
-            self._connected = False
-        except httpx.TimeoutException:
-            log.warning(f"Таймаут подключения к Docker MCP серверу: {self.base_url}")
-            self._connected = False
-        except Exception as exc:
-            log.warning(f"Ошибка подключения к Docker MCP серверу: {exc}")
-            self._connected = False
-
-    async def _process_sse_response(self, response_text: str) -> None:
-        """Process the SSE response to extract tools."""
-        try:
-            # Parse the response as SSE format
-            # Handle both direct JSON and SSE-formatted responses
-            if response_text.strip().startswith('event: message') or 'data: ' in response_text:
-                # This is an SSE response, parse it
-                lines = response_text.strip().split('\n')
-                for i, line in enumerate(lines):
-                    if line.startswith('data: '):
-                        try:
-                            import json
-                            data_content = line[6:]  # Remove 'data: ' prefix
-                            sse_data = json.loads(data_content)
-
-                            # Check if this is a JSON-RPC 2.0 response with tools
-                            if sse_data.get('jsonrpc') == '2.0' and 'result' in sse_data:
-                                result = sse_data['result']
-                                if isinstance(result, dict) and 'tools' in result:
-                                    self._process_tools(result['tools'])
-                                    self._tools_discovered = True
-                                    log.info(f"Инструменты получены через SSE: {len(self.tools)}")
-                                    for tool in self.tools:
-                                        log.info(f"  - {tool['function']['name']}: {tool['function']['description']}")
-                                    break  # Found tools, exit loop
-                        except json.JSONDecodeError:
-                            continue
-            else:
-                # Direct JSON response
-                import json
-                data = json.loads(response_text)
-                if data.get('jsonrpc') == '2.0' and 'result' in data:
-                    result = data['result']
-                    if isinstance(result, dict) and 'tools' in result:
-                        self._process_tools(result['tools'])
-                        self._tools_discovered = True
-                        log.info(f"Инструменты получены через JSON: {len(self.tools)}")
-                        for tool in self.tools:
-                            log.info(f"  - {tool['function']['name']}: {tool['function']['description']}")
-        except Exception as e:
-            log.warning(f"Ошибка парсинга SSE ответа: {e}")
-
-    def _process_tools(self, tools_list):
-        """Process the tools list from server response."""
-        self.tools = []
-
-        for tool in tools_list:
-            # Convert tool to OpenAI format
-            openai_tool = {
-                "type": "function",
-                "function": {
-                    "name": tool.get('name', ''),
-                    "description": tool.get('description', ''),
-                    "parameters": tool.get('inputSchema', {})
-                }
-            }
-            self.tools.append(openai_tool)
-
-
-
-    async def call_tool(self, name: str, arguments: dict) -> str:
-        """Вызывает инструмент Docker MCP сервера."""
-        if not self._connected:
-            return "[Предупреждение] Docker MCP сервер недоступен"
-
-        try:
-            # Send tool call request to the streamableHttp endpoint
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                headers = {
-                    "Content-Type": "application/json",
-                    "Accept": "application/json, text/event-stream",  # Required by streamableHttp
-                    "MCP-Version": "2024-11-05",
-                    "Protocol-Version": "2024-11-05",
-                }
-
-                payload = {
-                    "jsonrpc": "2.0",
-                    "method": "tools/call",
-                    "params": {
-                        "name": name,
-                        "arguments": arguments
-                    },
-                    "id": str(hash(f"tool_call_{name}"))[:8]  # Use a unique ID for JSON-RPC
-                }
-
-                response = await client.post(self.mcp_url, json=payload, headers=headers)
-
-                if response.status_code == 200:
-                    try:
-                        content_type = response.headers.get("content-type", "")
-                        response_text = response.text
-                        if response_text.strip():
-                            result = response.json()
-                            # Handle different possible response formats
-                            if isinstance(result, dict):
-                                if "result" in result:
-                                    return str(result["result"])
-                                elif "content" in result:
-                                    return str(result["content"])
-                                elif "message" in result:
-                                    return str(result["message"])
-                                else:
-                                    return str(result)
-                            else:
-                                return str(result)
-                        else:
-                            # Empty response is valid
-                            return "Инструмент успешно выполнен (без результата)"
-                    except Exception:
-                        # Server responded with 200 but response is not valid JSON
-                        # This can happen with streamableHttp protocols
-                        return f"Инструмент успешно выполнен, ответ: {response.text[:200]}..."
-                else:
-                    return f"[Ошибка] Код статуса: {response.status_code}, Ответ: {response.text}"
-
-        except httpx.ConnectError:
-            return "[Ошибка] Не удается подключиться к Docker MCP серверу"
-        except httpx.TimeoutException:
-            return "[Ошибка] Таймаут выполнения инструмента"
-        except Exception as exc:
-            error_msg = f"Ошибка вызова инструмента {name}: {exc}"
-            log.error(error_msg)
-            return f"[Ошибка] {error_msg}"
-
-    @property
-    def available_tools(self) -> list[dict]:
-        """Возвращает список доступных инструментов."""
-        # In a real implementation, tools would be discovered via the SSE stream
-        # using the MCP protocol's listTools endpoint over the SSE connection
-        return self.tools
-
-    @property
-    def connected(self) -> bool:
-        """Возвращает статус соединения."""
-        return self._connected
-
-# --------------------  ЧАТ КЛИЕНТ  --------------------
+# -------------------- CHAT CLIENT --------------------
 class ChatClient:
-    """Основной чат-клиент с интеграцией MCP и RAG."""
+    """
+    Main chat client with MCP and RAG integration.
 
-    def __init__(self, model_name: str = "glm-4.5-air") -> None:
+    Attributes:
+        model_name: Name of the LLM model
+        openai_client: OpenAI client instance
+        mcp_client: MCP STDIO client
+        docker_mcp_client: Docker MCP client
+        conversation: Conversation history
+        temperature: LLM temperature setting
+        rag_service: RAG service instance
+        use_rag: Whether RAG mode is enabled
+    """
+
+    def __init__(self, model_name: str = DEFAULT_MODEL) -> None:
+        """
+        Initialize the chat client.
+
+        Args:
+            model_name: Name of the LLM model to use
+        """
         self.model_name = model_name
         self.openai_client = build_openai_client()
         self.mcp_client = MCPClient()
         self.docker_mcp_client = DockerMCPClient()
-        self.conversation: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
-        self.temperature = 0.7
-        # Инициализация RAG сервиса
+        self.conversation: tp.List[dict] = [
+            {"role": "system", "content": SYSTEM_PROMPT}
+        ]
+        self.temperature = DEFAULT_TEMPERATURE
         self.rag_service = RAGService()
-        self.use_rag = False  # Флаг для включения/выключения RAG
+        self.use_rag = False
 
     async def process_query(self, query: str) -> str:
-        """Обрабатывает запрос пользователя с использованием доступных инструментов."""
-        log.info(f"Обработка запроса: {query[:50]}...")
+        """
+        Process user query using available tools.
 
-        # Проверяем, содержит ли запрос команду для управления RAG и реранкером
-        if query.lower().startswith('/rag'):
-            # Извлекаем команду и текст запроса
-            parts = query.split(' ', 2)  # Разбиваем на 3 части: команда, опционально подкоманда, опционально значение
-            if len(parts) == 1:
-                # Просто команда /rag - переключаем состояние RAG
-                self.use_rag = not self.use_rag
-                status = "включён" if self.use_rag else "выключен"
-                return f"RAG режим {status}."
-            elif len(parts) == 2:
-                # Проверяем, является ли второй элемент подкомандой
-                if parts[1].lower() == 'rerank':
-                    # Команда /rag rerank - переключаем реранкер
-                    rerank_status = self.rag_service.toggle_reranker()
-                    status = "включён" if rerank_status else "выключен"
-                    return f"Реранкер {status}."
-                elif parts[1].lower().startswith('threshold:'):
-                    # Команда /rag threshold:value - устанавливаем порог
-                    try:
-                        threshold_value = float(parts[1].split(':', 1)[1])
-                        new_threshold = self.rag_service.set_relevance_threshold(threshold_value)
-                        return f"Порог релевантности установлен: {new_threshold}."
-                    except (ValueError, IndexError):
-                        return f"Неверный формат порога. Используйте: /rag threshold:0.5"
-                else:
-                    # /rag с текстом запроса - обрабатываем с RAG
-                    actual_query = parts[1]
-                    rag_prompt = self.rag_service.get_rag_response(actual_query)
+        Args:
+            query: User query text
 
-                    # Отправляем RAG-запрос к LLM
-                    messages = self.conversation + [{"role": "user", "content": rag_prompt}]
+        Returns:
+            Assistant response
+        """
+        log.info(f"Processing query: {query[:50]}...")
 
-                    try:
-                        response = await self.openai_client.chat.completions.create(
-                            model=self.model_name,
-                            messages=messages,
-                            temperature=self.temperature,
-                            max_tokens=2048,
-                        )
-                        content = response.choices[0].message.content or ""
+        # Check for RAG control commands
+        if query.lower().startswith("/rag"):
+            return await self._handle_rag_command(query)
 
-                        # Добавляем оригинальный запрос и ответ в историю разговора
-                        self.conversation.append({"role": "user", "content": actual_query})
-                        self.conversation.append({"role": "assistant", "content": content})
+        # Use RAG for regular queries if enabled
+        if self.use_rag:
+            return await self._process_with_rag(query)
 
-                        return content
-                    except Exception as exc:
-                        error_msg = f"Ошибка при обработке RAG запроса: {exc}"
-                        log.error(error_msg)
-                        return f"Извините, произошла ошибка при обработке RAG запроса: {exc}"
-            else:  # len(parts) == 3
-                # Команда с подкомандой и значением, например: /rag threshold 0.5
-                subcommand = parts[1].lower()
-                value = parts[2]
+        # Process normally with tools
+        return await self._process_with_tools(query)
 
-                if subcommand == 'threshold':
-                    try:
-                        threshold_value = float(value)
-                        new_threshold = self.rag_service.set_relevance_threshold(threshold_value)
-                        return f"Порог релевантности установлен: {new_threshold}."
-                    except ValueError:
-                        return f"Неверное значение порога. Используйте числовое значение от 0 до 1."
-                else:
-                    # /rag с текстом запроса - обрабатываем с RAG
-                    actual_query = f"{parts[1]} {parts[2]}"
-                    rag_prompt = self.rag_service.get_rag_response(actual_query)
+    async def _handle_rag_command(self, query: str) -> str:
+        """Handle RAG-specific commands."""
+        parts = query.split(" ", 2)
+        if len(parts) == 1:
+            # Just /rag - toggle RAG mode
+            self.use_rag = not self.use_rag
+            status = "enabled" if self.use_rag else "disabled"
+            return f"RAG mode {status}."
+        elif len(parts) == 2:
+            if parts[1].lower() == "rerank":
+                # Toggle reranker
+                rerank_status = self.rag_service.toggle_reranker()
+                status = "enabled" if rerank_status else "disabled"
+                return f"Reranker {status}."
+            elif parts[1].lower().startswith("threshold:"):
+                # Set threshold
+                try:
+                    threshold_value = float(parts[1].split(":", 1)[1])
+                    new_threshold = self.rag_service.set_relevance_threshold(
+                        threshold_value
+                    )
+                    return f"Relevance threshold set to: {new_threshold}."
+                except (ValueError, IndexError):
+                    return "Invalid threshold format. Use: /rag threshold:0.5"
+            else:
+                # RAG query
+                actual_query = parts[1]
+                return await self._process_with_rag(actual_query)
+        else:  # len(parts) == 3
+            subcommand = parts[1].lower()
+            value = parts[2]
 
-                    # Отправляем RAG-запрос к LLM
-                    messages = self.conversation + [{"role": "user", "content": rag_prompt}]
+            if subcommand == "threshold":
+                try:
+                    threshold_value = float(value)
+                    new_threshold = self.rag_service.set_relevance_threshold(
+                        threshold_value
+                    )
+                    return f"Relevance threshold set to: {new_threshold}."
+                except ValueError:
+                    return "Invalid threshold value. Use a number from 0 to 1."
+            else:
+                # RAG query
+                actual_query = f"{parts[1]} {parts[2]}"
+                return await self._process_with_rag(actual_query)
 
-                    try:
-                        response = await self.openai_client.chat.completions.create(
-                            model=self.model_name,
-                            messages=messages,
-                            temperature=self.temperature,
-                            max_tokens=2048,
-                        )
-                        content = response.choices[0].message.content or ""
-
-                        # Добавляем оригинальный запрос и ответ в историю разговора
-                        self.conversation.append({"role": "user", "content": actual_query})
-                        self.conversation.append({"role": "assistant", "content": content})
-
-                        return content
-                    except Exception as exc:
-                        error_msg = f"Ошибка при обработке RAG запроса: {exc}"
-                        log.error(error_msg)
-                        return f"Извините, произошла ошибка при обработке RAG запроса: {exc}"
-
-        # Если RAG включен и запрос не начинается с /rag, используем RAG для обычного запроса
-        elif self.use_rag:
+    async def _process_with_rag(self, query: str) -> str:
+        """Process query using RAG."""
+        try:
             rag_prompt = self.rag_service.get_rag_response(query)
-
-            # Отправляем RAG-запрос к LLM
             messages = self.conversation + [{"role": "user", "content": rag_prompt}]
 
-            try:
-                response = await self.openai_client.chat.completions.create(
-                    model=self.model_name,
-                    messages=messages,
-                    temperature=self.temperature,
-                    max_tokens=2048,
-                )
-                content = response.choices[0].message.content or ""
+            response = await self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=2048,
+            )
+            content = response.choices[0].message.content or ""
 
-                # Добавляем оригинальный запрос и ответ в историю разговора
-                self.conversation.append({"role": "user", "content": query})
-                self.conversation.append({"role": "assistant", "content": content})
+            # Add original query and response to history
+            self.conversation.append({"role": "user", "content": query})
+            self.conversation.append({"role": "assistant", "content": content})
 
-                return content
-            except Exception as exc:
-                error_msg = f"Ошибка при обработке RAG запроса: {exc}"
-                log.error(error_msg)
-                return f"Извините, произошла ошибка при обработке RAG запроса: {exc}"
+            return content
+        except Exception as exc:
+            error_msg = f"Error processing RAG query: {exc}"
+            log.error(error_msg)
+            return f"Sorry, an error occurred while processing the RAG query: {exc}"
 
+    async def _process_with_tools(self, query: str) -> str:
+        """Process query using available tools."""
         try:
-            # Объединяем инструменты из обоих клиентов
+            # Combine tools from both clients
             all_tools = []
             all_tools.extend(self.mcp_client.available_tools or [])
             all_tools.extend(self.docker_mcp_client.available_tools or [])
 
-            # Начинаем цикл обработки, чтобы обработать потенциально несколько раундов вызовов инструментов
             messages = self.conversation + [{"role": "user", "content": query}]
 
-            while True:  # Цикл для обработки нескольких раундов инструментов
-                # Делаем запрос к OpenAI с доступными инструментами
+            while True:  # Loop for multiple rounds of tool calls
                 response = await self.openai_client.chat.completions.create(
                     model=self.model_name,
                     messages=messages,
@@ -812,236 +294,232 @@ class ChatClient:
                 assistant_message = response.choices[0].message
                 content = assistant_message.content or ""
 
-                # Проверяем, есть ли tool calls
+                # Check for tool calls
                 if assistant_message.tool_calls:
-                    log.info(f"Обнаружены вызовы инструментов: {[tc.function.name for tc in assistant_message.tool_calls]}")
+                    log.info(
+                        f"Detected tool calls: {[tc.function.name for tc in assistant_message.tool_calls]}"
+                    )
 
-                    # Добавляем сообщение ассистента
-                    messages.append({
-                        "role": "assistant",
-                        "content": content,
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments
+                    # Add assistant message
+                    messages.append(
+                        {
+                            "role": "assistant",
+                            "content": content,
+                            "tool_calls": [
+                                {
+                                    "id": tc.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.function.name,
+                                        "arguments": tc.function.arguments,
+                                    },
                                 }
-                            }
-                            for tc in assistant_message.tool_calls
-                        ]
-                    })
+                                for tc in assistant_message.tool_calls
+                            ],
+                        }
+                    )
 
-                    # Выполняем все tool calls
+                    # Execute all tool calls
                     for tool_call in assistant_message.tool_calls:
                         tool_name = tool_call.function.name
 
                         try:
                             tool_args = json.loads(tool_call.function.arguments)
 
-                            # Проверяем и корректируем формат аргументов, если они содержат XML-подобный формат
+                            # Handle XML-like arguments format
                             if isinstance(tool_args, str):
-                                # Проверяем, не является ли строка XML-подобной
-                                if '<arg_key>' in tool_args and '<arg_value>' in tool_args:
-                                    # Парсим XML-подобный формат в словарь
-                                    corrected_args = self._parse_xml_like_args(tool_args)
-                                    tool_args = corrected_args
+                                if "<tool_name>" in tool_args and "</tool_name>" in tool_args:
+                                    tool_args = self._parse_xml_like_args(tool_args)
                             elif isinstance(tool_args, dict):
-                                # Проверяем, не содержит ли словарь строки с XML-форматом
                                 for key, value in tool_args.items():
-                                    if isinstance(value, str) and '<arg_key>' in value and '<arg_value>' in value:
+                                    if isinstance(value, str) and "<tool_name>" in value and "</tool_name>" in value:
                                         tool_args[key] = self._parse_xml_like_args(value)
 
-                            log.info(f"Вызов инструмента: {tool_name} с аргументами: {tool_args}")
+                            log.info(f"Calling tool: {tool_name} with arguments: {tool_args}")
 
-                            # Определяем, какой клиент использовать для вызова инструмента
-                            tool_result = await self._call_appropriate_tool(tool_name, tool_args)
+                            tool_result = await self._call_appropriate_tool(
+                                tool_name, tool_args
+                            )
 
-                            log.info(f"Результат инструмента {tool_name}: {tool_result[:100]}...")
+                            log.info(f"Tool {tool_name} result: {tool_result[:100]}...")
 
-                            # Добавляем результат в контекст
-                            messages.append({
-                                "role": "tool",
-                                "tool_call_id": tool_call.id,
-                                "content": tool_result
-                            })
+                            messages.append(
+                                {
+                                    "role": "tool",
+                                    "tool_call_id": tool_call.id,
+                                    "content": tool_result,
+                                }
+                            )
                         except json.JSONDecodeError as e:
-                            log.error(f"Ошибка декодирования аргументов инструмента {tool_name}: {e}")
-                            # В случае ошибки декодирования, пробуем распарсить XML-подобный формат
+                            log.error(f"Error decoding tool arguments {tool_name}: {e}")
                             try:
-                                corrected_args = self._parse_xml_like_args(tool_call.function.arguments)
-                                tool_result = await self._call_appropriate_tool(tool_name, corrected_args)
+                                corrected_args = self._parse_xml_like_args(
+                                    tool_call.function.arguments
+                                )
+                                tool_result = await self._call_appropriate_tool(
+                                    tool_name, corrected_args
+                                )
 
-                                log.info(f"Результат инструмента {tool_name} (из XML-формата): {tool_result[:100]}...")
-
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tool_call.id,
-                                    "content": tool_result
-                                })
+                                messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "content": tool_result,
+                                    }
+                                )
                             except Exception as parse_error:
-                                log.error(f"Ошибка парсинга аргументов инструмента {tool_name}: {parse_error}")
-                                error_content = f"[Ошибка] Не удалось разобрать аргументы инструмента {tool_name}: {parse_error}"
-                                messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": tool_call.id,
-                                    "content": error_content
-                                })
+                                log.error(f"Error parsing tool arguments {tool_name}: {parse_error}")
+                                messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tool_call.id,
+                                        "content": f"[Error] Failed to parse tool arguments: {parse_error}",
+                                    }
+                                )
 
-                    # Продолжаем цикл, чтобы дать модели возможность сделать еще вызовы инструментов
-                    # или вернуть окончательный ответ (после нескольких раундов инструментов)
+                    # Continue loop for potential more tool calls
                     continue
                 else:
-                    # Нет tool calls, значит это окончательный ответ
-                    # Добавляем его в основную историю разговора
-                    self.conversation.extend(messages[1:])  # Добавляем все сообщения кроме системного
+                    # No tool calls, final response
+                    self.conversation.extend(messages[1:])
                     return content
 
         except Exception as exc:
-            error_msg = f"Ошибка при обработке запроса: {exc}"
+            error_msg = f"Error processing query: {exc}"
             log.error(error_msg)
-            return f"Извините, произошла ошибка: {exc}"
+            return f"Sorry, an error occurred: {exc}"
 
     def _parse_xml_like_args(self, xml_string: str) -> dict:
-        """Парсит XML-подобную строку аргументов в словарь."""
-        import re
-
+        """Parse XML-like argument string into dictionary."""
         args_dict = {}
 
-        # Регулярное выражение для поиска пар <arg_key> и <arg_value>
-        pattern = r'<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>'
+        # Regex for finding <tool_name> and <tool_description> pairs
+        pattern = r"<tool_name>(.*?)</tool_name>\s*<tool_description>(.*?)</tool_description>"
         matches = re.findall(pattern, xml_string, re.DOTALL)
 
         for key, value in matches:
-            # Очищаем значения от лишних пробелов и тегов
             key = key.strip()
             value = value.strip()
-            # Пытаемся определить тип значения
-            if value.lower() in ('true', 'false'):
-                value = value.lower() == 'true'
+
+            # Type inference
+            if value.lower() in ("true", "false"):
+                value = value.lower() == "true"
             elif value.isdigit():
                 value = int(value)
-            elif value.replace('.', '').isdigit():
+            elif value.replace(".", "").isdigit():
                 value = float(value)
             elif value.startswith('"') and value.endswith('"'):
-                value = value[1:-1]  # Убираем кавычки
+                value = value[1:-1]
 
             args_dict[key] = value
 
-        # Также проверяем общий формат, где вся строка может быть одним значением
-        if not args_dict and xml_string.strip().startswith('<arg_key>'):
-            # Попробуем найти все вхождения
-            all_matches = re.findall(r'<arg_key>([^<]*)</arg_key>\s*<arg_value>([^<]*)</arg_value>', xml_string)
-            for key, value in all_matches:
-                key = key.strip()
-                value = value.strip()
-                if value.lower() in ('true', 'false'):
-                    value = value.lower() == 'true'
-                elif value.isdigit():
-                    value = int(value)
-                elif value.replace('.', '', 1).isdigit():
-                    value = float(value)
-                args_dict[key] = value
-
         return args_dict
 
-
     async def _call_appropriate_tool(self, name: str, arguments: dict) -> str:
-        """Определяет, какой клиент использовать для вызова инструмента."""
-        # Проверяем, принадлежит ли инструмент к обычному MCP клиенту
-        stdio_tool_names = [tool['function']['name'] for tool in self.mcp_client.available_tools]
-        docker_tool_names = [tool['function']['name'] for tool in self.docker_mcp_client.available_tools]
+        """Determine which client to use for tool call."""
+        stdio_tool_names = [
+            tool["function"]["name"] for tool in self.mcp_client.available_tools
+        ]
+        docker_tool_names = [
+            tool["function"]["name"]
+            for tool in self.docker_mcp_client.available_tools
+        ]
 
-        log.info(f"Попытка вызвать инструмент '{name}' с аргументами: {arguments}")
+        log.info(f"Attempting to call tool '{name}' with arguments: {arguments}")
 
         if name in stdio_tool_names:
-            log.info(f"Вызов инструмента '{name}' через stdio клиент")
+            log.info(f"Calling tool '{name}' via stdio client")
             return await self.mcp_client.call_tool(name, arguments)
         elif name in docker_tool_names:
-            log.info(f"Вызов инструмента '{name}' через Docker клиент")
+            log.info(f"Calling tool '{name}' via Docker client")
             return await self.docker_mcp_client.call_tool(name, arguments)
         else:
-            # Если инструмент не найден ни в одном из списков, пробуем оба
-            # Сначала пробуем обычный MCP клиент
-            if self.mcp_client._running:  # Check if client is actually running
+            # Try both clients
+            if self.mcp_client._running:
                 result = await self.mcp_client.call_tool(name, arguments)
-                if result and not (result.startswith("[Ошибка]") or result.startswith("[Предупреждение]")):
-                    log.info(f"Инструмент '{name}' успешно вызван через stdio клиент")
+                if result and not (
+                    result.startswith("[Error]") or result.startswith("[Warning]")
+                ):
+                    log.info(f"Tool '{name}' successfully called via stdio client")
                     return result
 
-            # Если обычный клиент не дал результата, пробуем Docker-клиент
             if self.docker_mcp_client.connected:
                 result = await self.docker_mcp_client.call_tool(name, arguments)
-                if result and not (result.startswith("[Ошибка]") or result.startswith("[Предупреждение]")):
-                    log.info(f"Инструмент '{name}' успешно вызван через Docker клиент")
+                if result and not (
+                    result.startswith("[Error]") or result.startswith("[Warning]")
+                ):
+                    log.info(f"Tool '{name}' successfully called via Docker client")
                     return result
 
-            return f"[Ошибка] Инструмент '{name}' не найден ни в одном из активных серверов MCP"
+            return f"[Error] Tool '{name}' not found in any active MCP servers"
 
     async def start(self, server_script: str) -> None:
-        """Запускает клиента и подключается к MCP серверам."""
-        log.info("Запуск чат-клиента...")
+        """Start client and connect to MCP servers."""
+        log.info("Starting chat client...")
 
-        # Подключаемся к стандартному MCP серверу
+        # Connect to STDIO MCP server
         await self.mcp_client.connect_to_server(server_script)
 
-        # Подключаемся к Docker MCP серверу (не выбрасываем исключение при недоступности)
+        # Connect to Docker MCP server (don't raise exception if unavailable)
         await self.docker_mcp_client.connect_to_server()
 
-        log.info("Чат-клиент готов к работе!")
+        log.info("Chat client ready!")
 
     async def cleanup(self) -> None:
-        """Освобождает ресурсы."""
+        """Free resources."""
         await self.mcp_client.cleanup()
-        # Docker MCP не требует специальной очистки соединений
         await self.openai_client.close()
-        log.info("Клиент остановлен")
+        log.info("Client stopped")
 
     def add_message(self, role: str, content: str) -> None:
-        """Добавляет сообщение в историю."""
+        """Add message to conversation history."""
         self.conversation.append({"role": role, "content": content})
 
-# --------------------  ИНТЕРАКТИВНЫЙ ИНТЕРФЕЙС  --------------------
+
+# -------------------- INTERACTIVE INTERFACE --------------------
 async def interactive_chat(client: ChatClient) -> None:
-    """Интерактивный чат-цикл."""
+    """Interactive chat loop."""
     print("=" * 60)
-    print("ROBOT Чат-клиент с MCP инструментами")
-    print("Команды: quit/exit, save <имя>, load <имя>, temp <0-2>, clear, print")
-    print("RAG команды: /rag (вкл/выкл), /rag <вопрос> (вопрос с RAG), /rag rerank (вкл/выкл реранкер), /rag threshold <значение> (установить порог)")
+    print("ROBOT Chat Client with MCP Tools")
+    print("Commands: quit/exit, save <name>, load <name>, temp <0-2>, clear, print")
+    print(
+        "RAG commands: /rag (toggle), /rag <question> (RAG query), /rag rerank (toggle reranker), /rag threshold <value>"
+    )
     print("=" * 60)
 
     while True:
         try:
-            user_input = input("\nUSER Вы: ").strip()
+            user_input = input("\nUSER You: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n\nGOODBYE До свидания!")
+            print("\n\nGOODBYE Goodbye!")
             break
 
         if not user_input:
             continue
 
-        # Обработка команд
+        # Handle commands
         if user_input.lower() in ("quit", "exit"):
-            print("GOODBYE До свидания!")
+            print("GOODBYE Goodbye!")
             break
 
         if user_input.lower() == "clear":
             client.conversation = [{"role": "system", "content": SYSTEM_PROMPT}]
-            print("CLEARED История очищена")
+            print("CLEARED History cleared")
             continue
 
         if user_input.lower() == "print":
-            print("=" * 50, "HISTORY История разговора:", "=" * 50, sep="\n")
+            print("=" * 50, "HISTORY Conversation History:", "=" * 50, sep="\n")
             for i, msg in enumerate(client.conversation[1:], 1):
-                print(f"{i}. {msg['role'].upper()}: {msg['content'][:100]}{'...' if len(msg['content']) > 100 else ''}")
+                print(
+                    f"{i}. {msg['role'].upper()}: {msg['content'][:100]}{'...' if len(msg['content']) > 100 else ''}"
+                )
             print("=" * 50)
             continue
 
         if user_input.lower().startswith("save "):
             name = user_input[5:].strip()
             path = save_conversation(client.conversation, name)
-            print(f"SAVED Сохранено: {path}")
+            print(f"SAVED Saved: {path}")
             continue
 
         if user_input.lower().startswith("load "):
@@ -1049,7 +527,7 @@ async def interactive_chat(client: ChatClient) -> None:
             loaded, msg = load_conversation(name)
             if loaded:
                 client.conversation = loaded
-                print(f"LOADED Загружено: {msg}")
+                print(f"LOADED Loaded: {msg}")
             else:
                 print(f"ERROR {msg}")
             continue
@@ -1059,55 +537,51 @@ async def interactive_chat(client: ChatClient) -> None:
                 temp = float(user_input[5:].strip())
                 if 0.0 <= temp <= 2.0:
                     client.temperature = temp
-                    print(f"THERMOMETER Температура установлена: {temp}")
+                    print(f"THERMOMETER Temperature set to: {temp}")
                 else:
-                    print("WARNING Температура должна быть от 0 до 2")
+                    print("WARNING Temperature must be from 0 to 2")
             except ValueError:
-                print("WARNING Пример: temp 0.7")
+                print("WARNING Example: temp 0.7")
             continue
 
-        # Обработка обычного запроса
+        # Process query
         try:
             start_time = datetime.now()
-
-            # Обрабатываем запрос (метод process_query сам добавляет сообщения в историю)
             response = await client.process_query(user_input)
+            print(f"\nASSISTANT Assistant: {response}")
 
-            # Выводим ответ
-            print(f"\nASSISTANT Ассистент: {response}")
-
-            # Статистика
             elapsed = (datetime.now() - start_time).total_seconds()
-            total_tools = len(client.mcp_client.available_tools) + len(client.docker_mcp_client.available_tools)
-            print(f"TIME Время: {elapsed:.2f}с | Инструментов: {total_tools} (STDIO: {len(client.mcp_client.available_tools)}, Docker: {len(client.docker_mcp_client.available_tools)})")
+            total_tools = len(client.mcp_client.available_tools) + len(
+                client.docker_mcp_client.available_tools
+            )
+            print(
+                f"TIME Time: {elapsed:.2f}s | Tools: {total_tools} (STDIO: {len(client.mcp_client.available_tools)}, Docker: {len(client.docker_mcp_client.available_tools)})"
+            )
 
         except Exception as exc:
-            error_msg = f"ERROR Ошибка: {exc}"
+            error_msg = f"ERROR Error: {exc}"
             log.error(error_msg)
             print(error_msg)
 
-# --------------------  ГЛАВНАЯ ФУНКЦИЯ  --------------------
+
+# -------------------- MAIN FUNCTION --------------------
 async def main() -> None:
-    """Главная функция запуска."""
-    # Создаем клиента
-    client = ChatClient(model_name="glm-4.5-air")
+    """Main entry point."""
+    client = ChatClient(model_name=DEFAULT_MODEL)
 
     try:
-        # Подключаемся к MCP серверу
         await client.start(SERVER_SCRIPT)
-
-        # Запускаем интерактивный чат
         await interactive_chat(client)
 
     except KeyboardInterrupt:
-        print("\n\nSTOP Прервано пользователем")
+        print("\n\nSTOP Interrupted by user")
     except Exception as exc:
-        error_msg = f"CRITICAL Критическая ошибка: {exc}"
+        error_msg = f"CRITICAL Critical error: {exc}"
         log.exception(error_msg)
         print(error_msg)
     finally:
-        # Освобождаем ресурсы
         await client.cleanup()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
