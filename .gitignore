@@ -3,3 +3,17 @@ httpreq.http
 saves
 *.json
 *.pdftmpclaude*
+# Temporary files
+tmpclaude*/
+nul
+# CI Review outputs
+ci_review_*.md
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+# Virtual environment
+.venv/
+venv/
