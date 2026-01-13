@@ -70,7 +70,6 @@ class LocalCIReviewer:
         # Initialize RAG service
         self.rag_service = RAGService(
             collection_name="project_docs",  # Use indexed documentation
-            relevance_threshold=relevance_threshold,
         )
         self.rag_service.set_relevance_threshold(relevance_threshold)
 
