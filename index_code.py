@@ -16,7 +16,6 @@ from typing import Dict, List, Tuple
 sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), "src")))
 
 from src.config import (
-    DEFAULT_COLLECTION_NAME,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_OLLAMA_HOST,
     DEFAULT_QDRANT_HOST,
@@ -130,16 +129,14 @@ def chunk_code_by_functions(
 def index_python_files(
     root_dir: Path,
     indexer: QdrantIndexer,
-    embedding_model: str,
-    ollama_host: str,
+    embedder,
 ) -> int:
     """Index all Python files in the project.
 
     Args:
         root_dir: Root directory of the project
         indexer: QdrantIndexer instance
-        embedding_model: Name of the embedding model
-        ollama_host: Ollama API host
+        embedder: OllamaEmbeddingGenerator instance
 
     Returns:
         Number of indexed chunks
@@ -177,11 +174,12 @@ def index_python_files(
             chunks = chunk_code_by_functions(file_path, content)
 
             for chunk in chunks:
-                # Generate embedding
-                embedding = indexer.generate_embedding(chunk["content"])
+                # Generate embedding using OllamaEmbeddingGenerator
+                embedding = embedder.generate_embedding(chunk["content"])
 
                 # Create metadata
                 metadata = {
+                    "text": chunk["content"],
                     "file": str(chunk["file"]),
                     "start_line": chunk["start_line"],
                     "end_line": chunk["end_line"],
@@ -222,12 +220,19 @@ def main() -> None:
     # Create collection if not exists
     indexer.create_collection()
 
+    # Initialize embedder
+    from src.utils import OllamaEmbeddingGenerator
+    embedder = OllamaEmbeddingGenerator(
+        model_name=DEFAULT_EMBEDDING_MODEL,
+        ollama_host=DEFAULT_OLLAMA_HOST,
+    )
+
     # Get project root
     project_root = Path.cwd()
 
     # Index Python files
     indexed_count = index_python_files(
-        project_root, indexer, DEFAULT_EMBEDDING_MODEL, DEFAULT_OLLAMA_HOST
+        project_root, indexer, embedder
     )
 
     log.info(f"Code indexing completed: {indexed_count} chunks indexed")
