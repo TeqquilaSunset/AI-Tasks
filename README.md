@@ -38,6 +38,12 @@
   - Настройка температуры
   - RAG команды
   - Help команды
+- **AI PR Reviewer** (новое!):
+  - Автоматический анализ Pull Requests через CI
+  - RAG для поиска релевантной документации
+  - RAG для анализа кода
+  - MCP для интеграции с GitHub API
+  - Генерация структурированного ревью с замечаниями
 
 ### Структура проекта (после рефакторинга)
 
@@ -60,9 +66,16 @@ AI-Task-1/
 │       ├── __init__.py
 │       ├── mcp_client.py         # STDIO MCP клиент
 │       └── docker_mcp_client.py  # Docker MCP клиент
+├── .github/                      # GitHub Actions
+│   └── workflows/
+│       └── pr-review.yml         # CI пайплайн для ревью PR (новое!)
 ├── main.py                       # Главный чат-клиент (рефакторинг)
 ├── mcp_server.py                 # MCP сервер (+ Git инструменты!)
+├── github_mcp_server.py          # MCP сервер для GitHub API (новое!)
 ├── index_docs.py                 # Индексация документации (новое!)
+├── index_code.py                 # Индексация кода для PR (новое!)
+├── pr_reviewer.py                # Скрипт ревью PR (новое!)
+├── pr_reviewer_mcp.py            # Ревью PR через MCP (новое!)
 ├── pdf_pipeline.py               # PDF пайплайн (синхронный)
 ├── pdf_pipeline_async.py         # PDF пайплайн (асинхронный)
 ├── run_pipeline_gpu.py           # GPU-оптимизированный запуск
@@ -72,6 +85,7 @@ AI-Task-1/
 ├── docker-compose.yml            # Docker конфигурация
 ├── .env                          # Переменные окружения
 ├── README.md                     # Этот файл
+├── PR_REVIEWER_README.md         # Документация PR Reviewer (новое!)
 ├── Pipeline_README.md            # Документация PDF пайплайна
 └── GPU_SETUP.md                  # GPU настройки
 ```
@@ -177,6 +191,41 @@ python run_pipeline_gpu.py --pdf_path document.pdf --use_async --max_concurrent 
 - `--ollama_host` - URL Ollama (по умолчанию http://localhost:11434)
 - `--max_concurrent` - кол-во параллельных запросов (по умолчанию 10)
 
+#### AI PR Reviewer (новое!)
+
+Автоматическая система ревью Pull Requests с использованием RAG и MCP:
+
+**GitHub Actions CI**:
+- Автоматически запускается при создании/обновлении PR
+- Анализирует изменения с помощью RAG по документации и коду
+- Публикует ревью как комментарий в PR
+
+**Локальное использование**:
+```bash
+# Индексация кода для анализа
+python index_code.py
+
+# Ревью PR через GitHub API
+python pr_reviewer.py  # (требует настройки GITHUB_TOKEN в .env)
+
+# Ревью PR через MCP
+python pr_reviewer_mcp.py owner/repo 123
+```
+
+**Настройка GitHub Secrets**:
+- `OPENAI_API_KEY` - API ключ для LLM
+- `OPENAI_BASE_URL` - (опционально) URL OpenAI-совместимого API
+
+**Результат ревью включает**:
+- **Summary**: Обзор изменений
+- **Strengths**: Что сделано хорошо
+- **Concerns**: Потенциальные проблемы
+- **Suggestions**: Конкретные улучшения
+- **Documentation**: Проверка документации
+- **Testing**: Проверка тестов
+
+Подробнее: [PR_REVIEWER_README.md](PR_REVIEWER_README.md)
+
 ### MCP инструменты
 
 Доступные инструменты при запуске чата:
@@ -268,6 +317,12 @@ python run_pipeline_gpu.py --pdf_path document.pdf --use_async --max_concurrent 
   - Temperature control
   - RAG commands
   - Help commands
+- **AI PR Reviewer** (new!):
+  - Automated Pull Request analysis via CI
+  - RAG for relevant documentation search
+  - RAG for code analysis
+  - MCP for GitHub API integration
+  - Structured review generation with feedback
 
 ### Project Structure (after refactoring)
 
@@ -290,9 +345,16 @@ AI-Task-1/
 │       ├── __init__.py
 │       ├── mcp_client.py         # STDIO MCP client
 │       └── docker_mcp_client.py  # Docker MCP client
+├── .github/                      # GitHub Actions
+│   └── workflows/
+│       └── pr-review.yml         # CI pipeline for PR review (new!)
 ├── main.py                       # Main chat client (refactored)
 ├── mcp_server.py                 # MCP server (+ Git tools!)
+├── github_mcp_server.py          # MCP server for GitHub API (new!)
 ├── index_docs.py                 # Documentation indexer (new!)
+├── index_code.py                 # Code indexer for PR (new!)
+├── pr_reviewer.py                # PR review script (new!)
+├── pr_reviewer_mcp.py            # PR review via MCP (new!)
 ├── pdf_pipeline.py               # PDF pipeline (sync)
 ├── pdf_pipeline_async.py         # PDF pipeline (async)
 ├── run_pipeline_gpu.py           # GPU-optimized runner
@@ -302,6 +364,7 @@ AI-Task-1/
 ├── docker-compose.yml            # Docker configuration
 ├── .env                          # Environment variables
 ├── README.md                     # This file
+├── PR_REVIEWER_README.md         # PR Reviewer documentation (new!)
 ├── Pipeline_README.md            # PDF pipeline documentation
 └── GPU_SETUP.md                  # GPU setup guide
 ```
@@ -406,6 +469,41 @@ python run_pipeline_gpu.py --pdf_path document.pdf --use_async --max_concurrent 
 - `--embedding_model` - Ollama model (default: qwen3-embedding:latest)
 - `--ollama_host` - Ollama URL (default: http://localhost:11434)
 - `--max_concurrent` - concurrent requests (default: 10)
+
+#### AI PR Reviewer (new!)
+
+Automated Pull Request review system using RAG and MCP:
+
+**GitHub Actions CI**:
+- Automatically runs on PR creation/update
+- Analyzes changes using RAG on documentation and code
+- Posts review as PR comment
+
+**Local Usage**:
+```bash
+# Index code for analysis
+python index_code.py
+
+# Review PR via GitHub API
+python pr_reviewer.py  # (requires GITHUB_TOKEN in .env)
+
+# Review PR via MCP
+python pr_reviewer_mcp.py owner/repo 123
+```
+
+**GitHub Secrets Setup**:
+- `OPENAI_API_KEY` - LLM API key
+- `OPENAI_BASE_URL` - (optional) OpenAI-compatible API URL
+
+**Review includes**:
+- **Summary**: Changes overview
+- **Strengths**: What was done well
+- **Concerns**: Potential issues
+- **Suggestions**: Specific improvements
+- **Documentation**: Documentation check
+- **Testing**: Test coverage check
+
+See [PR_REVIEWER_README.md](PR_REVIEWER_README.md) for details
 
 ### MCP Tools
 
