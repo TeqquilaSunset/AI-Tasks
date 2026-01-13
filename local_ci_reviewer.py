@@ -67,11 +67,18 @@ class LocalCIReviewer:
         self.relevance_threshold = relevance_threshold
         self.top_k = top_k
 
-        # Initialize RAG service
-        self.rag_service = RAGService(
-            collection_name="project_docs",  # Use indexed documentation
+        # Initialize RAG services for both documentation and code
+        # Documentation service (README, docs, etc.)
+        self.docs_rag_service = RAGService(
+            collection_name="project_docs",  # Documentation
         )
-        self.rag_service.set_relevance_threshold(relevance_threshold)
+        self.docs_rag_service.set_relevance_threshold(relevance_threshold)
+
+        # Code service (indexed by functions/classes)
+        self.code_rag_service = RAGService(
+            collection_name="code_chunks",  # Code chunks
+        )
+        self.code_rag_service.set_relevance_threshold(relevance_threshold)
 
         log.info(f"Local CI Reviewer initialized with base_branch={base_branch}, threshold={relevance_threshold}")
 
@@ -172,18 +179,37 @@ class LocalCIReviewer:
         """
         Search for relevant documentation using RAG.
 
+        Searches in both project_docs (documentation) and code_chunks (code).
+
         Args:
             query: Search query
 
         Returns:
-            List of relevant documentation chunks
+            List of relevant documentation chunks from both sources
         """
+        all_results = []
+
+        # Search in documentation (README, docs, etc.)
         try:
-            results = self.rag_service.search_similar(query, top_k=self.top_k)
-            return results
+            log.info("Searching in project_docs...")
+            docs_results = self.docs_rag_service.search_similar(query, top_k=self.top_k)
+            all_results.extend(docs_results)
+            log.info(f"Found {len(docs_results)} results from project_docs")
         except Exception as e:
-            log.warning(f"Could not search documentation: {e}")
-            return []
+            log.warning(f"Could not search project_docs: {e}")
+
+        # Search in code chunks (functions, classes)
+        try:
+            log.info("Searching in code_chunks...")
+            code_results = self.code_rag_service.search_similar(query, top_k=self.top_k)
+            all_results.extend(code_results)
+            log.info(f"Found {len(code_results)} results from code_chunks")
+        except Exception as e:
+            log.warning(f"Could not search code_chunks: {e}")
+
+        # Sort by score and return top results
+        all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+        return all_results[:self.top_k * 2]  # Return more results for better context
 
     def generate_review_prompt(
         self,
@@ -394,15 +420,38 @@ class LocalCIReviewer:
         log.info("=" * 60)
 
         # Check if documentation is indexed
+        docs_indexed = False
+        code_indexed = False
+
         try:
-            test_results = self.rag_service.search_similar("test", top_k=1)
-            if not test_results:
-                log.warning("⚠️  Warning: Documentation may not be indexed.")
-                log.warning("   Run 'python index_docs.py' for better results.")
-                log.warning("   Continuing with review anyway...\n")
-        except Exception as e:
-            log.warning(f"⚠️  Warning: Could not verify documentation index: {e}")
+            test_results = self.docs_rag_service.search_similar("test", top_k=1)
+            if test_results:
+                docs_indexed = True
+        except:
+            pass
+
+        try:
+            test_results = self.code_rag_service.search_similar("test", top_k=1)
+            if test_results:
+                code_indexed = True
+        except:
+            pass
+
+        if not docs_indexed and not code_indexed:
+            log.warning("⚠️  Warning: No documentation or code indexed.")
+            log.warning("   Run 'python index_docs.py' to index documentation.")
+            log.warning("   Run 'python index_code.py' to index code by functions/classes.")
             log.warning("   Continuing with review anyway...\n")
+        elif not docs_indexed:
+            log.warning("⚠️  Warning: Documentation not indexed.")
+            log.warning("   Run 'python index_docs.py' for better results.")
+            log.warning("   Code indexing is active.\n")
+        elif not code_indexed:
+            log.warning("⚠️  Warning: Code not indexed.")
+            log.warning("   Run 'python index_code.py' for smarter code review.")
+            log.warning("   Documentation indexing is active.\n")
+        else:
+            log.info("✓ Both documentation and code are indexed.\n")
 
         # Get changed files
         current_branch = self.get_current_branch()

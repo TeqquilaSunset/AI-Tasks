@@ -216,7 +216,7 @@ def main() -> None:
     indexer = QdrantIndexer(
         host=DEFAULT_QDRANT_HOST,
         port=DEFAULT_QDRANT_PORT,
-        collection_name=DEFAULT_COLLECTION_NAME,
+        collection_name="code_chunks",  # Separate collection for code
     )
 
     # Create collection if not exists
