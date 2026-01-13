@@ -62,7 +62,8 @@ AI-Task-1/
 │       └── docker_mcp_client.py  # Docker MCP клиент
 ├── main.py                       # Главный чат-клиент (рефакторинг)
 ├── mcp_server.py                 # MCP сервер (+ Git инструменты!)
-├── index_docs.py                 # Индексация документации (новое!)
+├── index_docs.py                 # Индексация документации
+├── local_ci_reviewer.py          # Локальный CI ревьюер (новое!)
 ├── pdf_pipeline.py               # PDF пайплайн (синхронный)
 ├── pdf_pipeline_async.py         # PDF пайплайн (асинхронный)
 ├── run_pipeline_gpu.py           # GPU-оптимизированный запуск
@@ -176,6 +177,44 @@ python run_pipeline_gpu.py --pdf_path document.pdf --use_async --max_concurrent 
 - `--embedding_model` - модель Ollama (по умолчанию qwen3-embedding:latest)
 - `--ollama_host` - URL Ollama (по умолчанию http://localhost:11434)
 - `--max_concurrent` - кол-во параллельных запросов (по умолчанию 10)
+
+#### Локальный CI ревьюер (новое!)
+
+Автоматический ревью кода с использованием RAG и LLM:
+
+```bash
+# Базовый запуск - сравнение с origin/main
+python local_ci_reviewer.py
+
+# С указанием базовой ветки
+python local_ci_reviewer.py --base origin/master
+
+# С настройкой порога релевантности RAG
+python local_ci_reviewer.py --threshold 0.5 --top_k 10
+
+# С указанием выходного файла
+python local_ci_reviewer.py --output my_review.md
+```
+
+**Параметры**:
+- `--base` - базовая ветка для сравнения (по умолчанию: origin/main)
+- `--threshold` - порог релевантности RAG (по умолчанию: 0.3)
+- `--top_k` - количество результатов RAG (по умолчанию: 5)
+- `--output` - путь к выходному markdown файлу
+
+**Что делает локальный CI**:
+1. Получает git diff изменений
+2. Использует RAG для поиска релевантной документации и правил
+3. Генерирует комплексное ревью с помощью LLM
+4. Сохраняет результат в markdown файл и выводит в консоль
+
+**Секции ревью**:
+- Summary - обзор изменений
+- Strengths - что сделано хорошо
+- Concerns & Issues - потенциальные проблемы
+- Suggestions - конкретные рекомендации
+- Documentation Check - проверка документации
+- Testing Considerations - рекомендации по тестированию
 
 ### MCP инструменты
 
@@ -406,6 +445,44 @@ python run_pipeline_gpu.py --pdf_path document.pdf --use_async --max_concurrent 
 - `--embedding_model` - Ollama model (default: qwen3-embedding:latest)
 - `--ollama_host` - Ollama URL (default: http://localhost:11434)
 - `--max_concurrent` - concurrent requests (default: 10)
+
+#### Local CI Reviewer (new!)
+
+Automated code review using RAG and LLM:
+
+```bash
+# Basic run - compare with origin/main
+python local_ci_reviewer.py
+
+# With specific base branch
+python local_ci_reviewer.py --base origin/master
+
+# With RAG relevance threshold
+python local_ci_reviewer.py --threshold 0.5 --top_k 10
+
+# With custom output file
+python local_ci_reviewer.py --output my_review.md
+```
+
+**Parameters**:
+- `--base` - base branch to compare against (default: origin/main)
+- `--threshold` - RAG relevance threshold (default: 0.3)
+- `--top_k` - number of RAG results (default: 5)
+- `--output` - output markdown file path
+
+**What the local CI does**:
+1. Gets git diff of changes
+2. Uses RAG to find relevant documentation and rules
+3. Generates comprehensive review with LLM
+4. Saves result to markdown file and outputs to console
+
+**Review Sections**:
+- Summary - overview of changes
+- Strengths - what was done well
+- Concerns & Issues - potential problems
+- Suggestions - specific recommendations
+- Documentation Check - documentation verification
+- Testing Considerations - testing recommendations
 
 ### MCP Tools
 
