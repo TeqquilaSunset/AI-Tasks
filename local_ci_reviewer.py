@@ -92,6 +92,8 @@ class LocalCIReviewer:
                 text=True,
                 check=True,
                 timeout=30,
+                encoding='utf-8',
+                errors='replace',
             )
             return result.stdout
         except subprocess.CalledProcessError as e:
