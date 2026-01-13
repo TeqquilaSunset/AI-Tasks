@@ -216,9 +216,9 @@ class LocalCIReviewer:
         docs_section = "\n\n".join(docs_context) if docs_context else "No relevant documentation found."
 
         # Build prompt
-        prompt = f"""You are an expert code reviewer conducting a comprehensive review of changes.
+        prompt = f"""Ты эксперт по коду, проводящий комплексную ревью изменений. ВСЁ РЕВЬЮ ДОЛЖНО БЫТЬ НА РУССКОМ ЯЗЫКЕ.
 
-## Changed Files
+## Измененные файлы
 {chr(10).join(f'- {f}' for f in changed_files)}
 
 ## Git Diff
@@ -226,43 +226,43 @@ class LocalCIReviewer:
 {diff_content[:5000]}
 ```
 
-## Relevant Documentation & Rules
+## Релевантная документация и правила
 {docs_section}
 
-## Instructions
-Provide a comprehensive code review with the following sections:
+## Инструкции
+Предоставь комплексное ревью кода на русском языке со следующими секциями:
 
-### 1. Summary
-Brief overview of what changes were made and their purpose.
+### 1. Обзор (Summary)
+Краткий обзор того, какие изменения были сделаны и их цель.
 
-### 2. Strengths
-What was done well in these changes (code quality, structure, etc.)
+### 2. Сильные стороны (Strengths)
+Что сделано хорошо в этих изменениях (качество кода, структура и т.д.)
 
-### 3. Concerns & Issues
-Potential problems, bugs, or areas that need attention. Be specific:
-- Security vulnerabilities
-- Performance issues
-- Logic errors
-- Code smell
+### 3. Проблемы и опасения (Concerns & Issues)
+Потенциальные проблемы, баги или области, требующие внимания. Будь конкретен:
+- Уязвимости безопасности
+- Проблемы производительности
+- Логические ошибки
+- Плохой код (code smell)
 
-### 4. Suggestions
-Concrete recommendations for improvement:
-- Code structure
-- Best practices
-- Refactoring opportunities
-- Documentation updates
+### 4. Рекомендации (Suggestions)
+Конкретные рекомендации по улучшению:
+- Структура кода
+- Лучшие практики
+- Возможности рефакторинга
+- Обновление документации
 
-### 5. Documentation Check
-- Are changes documented?
-- Is README updated if needed?
-- Are docstrings present and clear?
+### 5. Проверка документации (Documentation Check)
+- Зафиксированы ли изменения в документации?
+- Обновлен ли README если нужно?
+- Присутствуют ли docstrings и понятны ли они?
 
-### 6. Testing Considerations
-- What tests should be added?
-- Edge cases to cover
-- Integration points to verify
+### 6. Рекомендации по тестированию (Testing Considerations)
+- Какие тесты следует добавить?
+- Граничные случаи для покрытия
+- Точки интеграции для проверки
 
-Be thorough but concise. Reference specific files and line numbers when possible.
+Будь тщательным, но лаконичным. Указывай конкретные файлы и номера строк когда возможно.
 """
 
         return prompt
@@ -297,7 +297,7 @@ Be thorough but concise. Reference specific files and line numbers when possible
                 "messages": [
                     {
                         "role": "system",
-                        "content": "You are an expert code reviewer providing thorough, constructive feedback.",
+                        "content": "Ты эксперт по ревью кода, предоставляющий тщательную и конструктивную обратную связь на русском языке.",
                     },
                     {"role": "user", "content": prompt},
                 ],

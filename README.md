@@ -209,12 +209,14 @@ python local_ci_reviewer.py --output my_review.md
 4. Сохраняет результат в markdown файл и выводит в консоль
 
 **Секции ревью**:
-- Summary - обзор изменений
-- Strengths - что сделано хорошо
-- Concerns & Issues - потенциальные проблемы
-- Suggestions - конкретные рекомендации
-- Documentation Check - проверка документации
-- Testing Considerations - рекомендации по тестированию
+- Обзор (Summary) - краткий обзор изменений
+- Сильные стороны (Strengths) - что сделано хорошо
+- Проблемы и опасения (Concerns & Issues) - потенциальные проблемы
+- Рекомендации (Suggestions) - конкретные рекомендации
+- Проверка документации (Documentation Check) - проверка документации
+- Рекомендации по тестированию (Testing Considerations) - рекомендации по тестированию
+
+**Важно**: Ревью генерируется на русском языке.
 
 ### MCP инструменты
 
@@ -477,12 +479,14 @@ python local_ci_reviewer.py --output my_review.md
 4. Saves result to markdown file and outputs to console
 
 **Review Sections**:
-- Summary - overview of changes
+- Overview (Summary) - overview of changes
 - Strengths - what was done well
 - Concerns & Issues - potential problems
 - Suggestions - specific recommendations
 - Documentation Check - documentation verification
 - Testing Considerations - testing recommendations
+
+**Note**: The review is generated in Russian language.
 
 ### MCP Tools
 
