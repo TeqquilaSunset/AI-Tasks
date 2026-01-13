@@ -202,10 +202,21 @@ python local_ci_reviewer.py --output my_review.md
 - `--top_k` - количество результатов RAG (по умолчанию: 5)
 - `--output` - путь к выходному markdown файлу
 
+**Подготовка перед первым запуском**:
+```bash
+# Индексация документации (README, docs, etc.)
+python index_docs.py
+
+# Индексация кода по функциям и классам (опционально, но рекомендуется)
+python index_code.py
+```
+
 **Что делает локальный CI**:
 1. Получает git diff изменений
-2. Использует RAG для поиска релевантной документации и правил
-3. Генерирует комплексное ревью с помощью LLM
+2. Использует RAG для поиска в двух источниках:
+   - `project_docs`: документация, README, настройки
+   - `code_chunks`: Python код, индексированный по функциям/классам
+3. Генерирует комплексное ревью с помощью LLM на основе найденного контекста
 4. Сохраняет результат в markdown файл и выводит в консоль
 
 **Секции ревью**:
@@ -472,10 +483,21 @@ python local_ci_reviewer.py --output my_review.md
 - `--top_k` - number of RAG results (default: 5)
 - `--output` - output markdown file path
 
+**Preparation before first run**:
+```bash
+# Index documentation (README, docs, etc.)
+python index_docs.py
+
+# Index code by functions and classes (optional but recommended)
+python index_code.py
+```
+
 **What the local CI does**:
 1. Gets git diff of changes
-2. Uses RAG to find relevant documentation and rules
-3. Generates comprehensive review with LLM
+2. Uses RAG to search in two sources:
+   - `project_docs`: documentation, README, configs
+   - `code_chunks`: Python code indexed by functions/classes
+3. Generates comprehensive review with LLM based on found context
 4. Saves result to markdown file and outputs to console
 
 **Review Sections**:
