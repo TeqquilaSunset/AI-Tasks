@@ -8,9 +8,12 @@ from __future__ import annotations
 import ast
 import os
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+from qdrant_client.http.models import PointStruct
 
 # Add src to path for imports
 sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), "src")))
@@ -189,9 +192,17 @@ def index_python_files(
                     "indexed_at": datetime.now().isoformat(),
                 }
 
-                # Insert into Qdrant
-                point_id = f"{file_path}:{chunk['element_name']}:{chunk['start_line']}"
-                indexer.upsert(point_id, embedding, chunk["content"], metadata)
+                # Insert into Qdrant using client directly
+                point = PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=embedding,
+                    payload=metadata
+                )
+
+                indexer.client.upsert(
+                    collection_name=indexer.collection_name,
+                    points=[point]
+                )
 
                 indexed_count += 1
 
