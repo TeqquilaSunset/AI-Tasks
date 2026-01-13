@@ -8,15 +8,17 @@ from __future__ import annotations
 import ast
 import os
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+from qdrant_client.http.models import PointStruct
 
 # Add src to path for imports
 sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), "src")))
 
 from src.config import (
-    DEFAULT_COLLECTION_NAME,
     DEFAULT_EMBEDDING_MODEL,
     DEFAULT_OLLAMA_HOST,
     DEFAULT_QDRANT_HOST,
@@ -130,16 +132,14 @@ def chunk_code_by_functions(
 def index_python_files(
     root_dir: Path,
     indexer: QdrantIndexer,
-    embedding_model: str,
-    ollama_host: str,
+    embedder,
 ) -> int:
     """Index all Python files in the project.
 
     Args:
         root_dir: Root directory of the project
         indexer: QdrantIndexer instance
-        embedding_model: Name of the embedding model
-        ollama_host: Ollama API host
+        embedder: OllamaEmbeddingGenerator instance
 
     Returns:
         Number of indexed chunks
@@ -177,11 +177,12 @@ def index_python_files(
             chunks = chunk_code_by_functions(file_path, content)
 
             for chunk in chunks:
-                # Generate embedding
-                embedding = indexer.generate_embedding(chunk["content"])
+                # Generate embedding using OllamaEmbeddingGenerator
+                embedding = embedder.generate_embedding(chunk["content"])
 
                 # Create metadata
                 metadata = {
+                    "text": chunk["content"],
                     "file": str(chunk["file"]),
                     "start_line": chunk["start_line"],
                     "end_line": chunk["end_line"],
@@ -191,9 +192,17 @@ def index_python_files(
                     "indexed_at": datetime.now().isoformat(),
                 }
 
-                # Insert into Qdrant
-                point_id = f"{file_path}:{chunk['element_name']}:{chunk['start_line']}"
-                indexer.upsert(point_id, embedding, chunk["content"], metadata)
+                # Insert into Qdrant using client directly
+                point = PointStruct(
+                    id=str(uuid.uuid4()),
+                    vector=embedding,
+                    payload=metadata
+                )
+
+                indexer.client.upsert(
+                    collection_name=indexer.collection_name,
+                    points=[point]
+                )
 
                 indexed_count += 1
 
@@ -212,22 +221,34 @@ def main() -> None:
     """Main entry point."""
     log.info("Starting code indexing...")
 
+    # Initialize embedder first to get embedding dimension
+    from src.utils import OllamaEmbeddingGenerator
+    embedder = OllamaEmbeddingGenerator(
+        model_name=DEFAULT_EMBEDDING_MODEL,
+        ollama_host=DEFAULT_OLLAMA_HOST,
+    )
+
+    # Get embedding dimension by generating a test embedding
+    test_embedding = embedder.generate_embedding("test")
+    vector_size = len(test_embedding)
+    log.info(f"Detected embedding dimension: {vector_size}")
+
     # Initialize indexer
     indexer = QdrantIndexer(
         host=DEFAULT_QDRANT_HOST,
         port=DEFAULT_QDRANT_PORT,
-        collection_name=DEFAULT_COLLECTION_NAME,
+        collection_name="code_chunks",  # Separate collection for code
     )
 
-    # Create collection if not exists
-    indexer.create_collection()
+    # Create collection if not exists with correct vector size
+    indexer.create_collection(vector_size=vector_size)
 
     # Get project root
     project_root = Path.cwd()
 
     # Index Python files
     indexed_count = index_python_files(
-        project_root, indexer, DEFAULT_EMBEDDING_MODEL, DEFAULT_OLLAMA_HOST
+        project_root, indexer, embedder
     )
 
     log.info(f"Code indexing completed: {indexed_count} chunks indexed")
