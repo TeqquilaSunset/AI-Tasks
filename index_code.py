@@ -221,6 +221,18 @@ def main() -> None:
     """Main entry point."""
     log.info("Starting code indexing...")
 
+    # Initialize embedder first to get embedding dimension
+    from src.utils import OllamaEmbeddingGenerator
+    embedder = OllamaEmbeddingGenerator(
+        model_name=DEFAULT_EMBEDDING_MODEL,
+        ollama_host=DEFAULT_OLLAMA_HOST,
+    )
+
+    # Get embedding dimension by generating a test embedding
+    test_embedding = embedder.generate_embedding("test")
+    vector_size = len(test_embedding)
+    log.info(f"Detected embedding dimension: {vector_size}")
+
     # Initialize indexer
     indexer = QdrantIndexer(
         host=DEFAULT_QDRANT_HOST,
@@ -228,15 +240,8 @@ def main() -> None:
         collection_name="code_chunks",  # Separate collection for code
     )
 
-    # Create collection if not exists
-    indexer.create_collection()
-
-    # Initialize embedder
-    from src.utils import OllamaEmbeddingGenerator
-    embedder = OllamaEmbeddingGenerator(
-        model_name=DEFAULT_EMBEDDING_MODEL,
-        ollama_host=DEFAULT_OLLAMA_HOST,
-    )
+    # Create collection if not exists with correct vector size
+    indexer.create_collection(vector_size=vector_size)
 
     # Get project root
     project_root = Path.cwd()
