@@ -25,10 +25,32 @@ from mcp.server.fastmcp import FastMCP
 sys.path.insert(0, str(os.path.join(os.path.dirname(__file__), "src")))
 
 from src.utils import setup_logging
+from src.services.task_service import TaskService
 
 # --------------------  LOGGING  --------------------
 # Important: only write to stderr for STDIO-based servers
 log = setup_logging("weather-server", output_stream="stderr")
+
+# --------------------  TASK SERVICE  --------------------
+# Lazy initialization to avoid logging during module import
+task_service = None
+
+def get_task_service():
+    """Get or create task service instance."""
+    global task_service
+    if task_service is None:
+        # Create service with stderr logging
+        import logging
+        from src.services.task_service import TaskService
+
+        # Temporarily override task service logging to stderr
+        original_logger = logging.getLogger("task-service")
+        original_logger.setLevel(logging.WARNING)  # Suppress info logs during init
+
+        task_service = TaskService()
+        original_logger.setLevel(logging.INFO)  # Restore
+
+    return task_service
 
 load_dotenv()
 
@@ -527,6 +549,343 @@ def git_get_repo_info(repo_path: str = ".") -> str:
     if not info:
         return "Not a git repository"
     return "\n".join(info)
+
+
+# --------------------  TASK MANAGEMENT TOOLS  --------------------
+@mcp.tool()
+async def task_create(
+    title: str,
+    description: str = "",
+    priority: str = "medium",
+    task_type: str = "feature",
+    assignee: str = None,
+    labels: str = "",
+    due_date: str = None,
+    estimated_hours: int = None,
+    story_points: int = None
+) -> str:
+    """Создать новую задачу в проекте.
+
+    Args:
+        title: Название задачи
+        description: Описание задачи
+        priority: Приоритет (critical, high, medium, low)
+        task_type: Тип задачи (feature, bug, enhancement, documentation, optimization, refactoring)
+        assignee: Исполнитель (username)
+        labels: Метки через запятую (например: "mcp,urgent,frontend")
+        due_date: Срок выполнения в формате ISO (2026-01-20T18:00:00Z)
+        estimated_hours: Оценка в часах
+        story_points: Story Points для Agile
+    """
+    try:
+        ts = get_task_service()
+        label_list = [l.strip() for l in labels.split(",")] if labels else []
+        task = ts.create_task(
+            title=title,
+            description=description,
+            priority=priority,
+            type=task_type,
+            assignee=assignee,
+            labels=label_list,
+            due_date=due_date,
+            estimated_hours=estimated_hours,
+            story_points=story_points
+        )
+        log.info(f"Created task {task.id}: {task.title}")
+        return (
+            f"Задача создана успешно!\n\n"
+            f"ID: {task.id}\n"
+            f"Название: {task.title}\n"
+            f"Статус: {task.status}\n"
+            f"Приоритет: {task.priority}\n"
+            f"Тип: {task.type}\n"
+            f"Исполнитель: {task.assignee or 'Не назначен'}\n"
+            f"Создана: {task.created_at}"
+        )
+    except Exception as e:
+        error_msg = f"Ошибка при создании задачи: {e}"
+        log.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def task_list(
+    status: str = None,
+    priority: str = None,
+    assignee: str = None,
+    limit: int = 20
+) -> str:
+    """Показать список задач с возможностью фильтрации.
+
+    Args:
+        status: Фильтр по статусу (todo, in_progress, in_review, done, cancelled, open)
+        priority: Фильтр по приоритету (critical, high, medium, low)
+        assignee: Фильтр по исполнителю
+        limit: Максимальное количество задач для отображения
+    """
+    try:
+        ts = get_task_service()
+        tasks = ts.get_all_tasks(
+            status=status,
+            priority=priority,
+            assignee=assignee
+        )
+
+        tasks = tasks[:limit]
+
+        if not tasks:
+            return "Задачи не найдены."
+
+        result = f"Найдено задач: {len(tasks)}\n\n"
+        for task in tasks:
+            result += (
+                f"**{task.id}**: {task.title}\n"
+                f"  Статус: {task.status} | Приоритет: {task.priority} | Тип: {task.type}\n"
+                f"  Исполнитель: {task.assignee or 'Не назначен'}\n"
+            )
+            if task.due_date:
+                result += f"  Срок: {task.due_date}\n"
+            if task.labels:
+                result += f"  Метки: {', '.join(task.labels)}\n"
+            result += "\n"
+
+        return result.strip()
+    except Exception as e:
+        error_msg = f"Ошибка при получении списка задач: {e}"
+        log.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def task_get(task_id: str) -> str:
+    """Получить подробную информацию о задаче.
+
+    Args:
+        task_id: ID задачи (например: task_001)
+    """
+    try:
+        ts = get_task_service()
+        task = ts.get_task(task_id)
+        if not task:
+            return f"Задача не найдена: {task_id}"
+
+        context = ts.get_task_context_for_rag(task_id)
+        return context
+    except Exception as e:
+        error_msg = f"Ошибка при получении задачи: {e}"
+        log.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def task_update_status(task_id: str, status: str) -> str:
+    """Обновить статус задачи.
+
+    Args:
+        task_id: ID задачи
+        status: Новый статус (todo, in_progress, in_review, done, cancelled, open)
+    """
+    try:
+        ts = get_task_service()
+        task = ts.update_task_status(task_id, status)
+        log.info(f"Updated task {task_id} status to {status}")
+        return f"Статус задачи {task_id} обновлен на '{status}'"
+    except ValueError as e:
+        return str(e)
+    except Exception as e:
+        error_msg = f"Ошибка при обновлении статуса: {e}"
+        log.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def task_update_priority(task_id: str, priority: str) -> str:
+    """Обновить приоритет задачи.
+
+    Args:
+        task_id: ID задачи
+        priority: Новый приоритет (critical, high, medium, low)
+    """
+    try:
+        ts = get_task_service()
+        task = ts.update_task_priority(task_id, priority)
+        log.info(f"Updated task {task_id} priority to {priority}")
+        return f"Приоритет задачи {task_id} обновлен на '{priority}'"
+    except ValueError as e:
+        return str(e)
+    except Exception as e:
+        error_msg = f"Ошибка при обновлении приоритета: {e}"
+        log.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def task_assign(task_id: str, assignee: str) -> str:
+    """Назначить задачу на пользователя.
+
+    Args:
+        task_id: ID задачи
+        assignee: Имя пользователя
+    """
+    try:
+        ts = get_task_service()
+        task = ts.assign_task(task_id, assignee)
+        log.info(f"Assigned task {task_id} to {assignee}")
+        return f"Задача {task_id} назначена на '{assignee}'"
+    except ValueError as e:
+        return str(e)
+    except Exception as e:
+        error_msg = f"Ошибка при назначении задачи: {e}"
+        log.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def task_add_comment(task_id: str, author: str, content: str) -> str:
+    """Добавить комментарий к задаче.
+
+    Args:
+        task_id: ID задачи
+        author: Автор комментария
+        content: Текст комментария
+    """
+    try:
+        ts = get_task_service()
+        comment = ts.add_comment(task_id, author, content)
+        log.info(f"Added comment to task {task_id}")
+        return f"Комментарий добавлен к задаче {task_id}"
+    except ValueError as e:
+        return str(e)
+    except Exception as e:
+        error_msg = f"Ошибка при добавлении комментария: {e}"
+        log.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def task_search(query: str, limit: int = 10) -> str:
+    """Поиск задач по названию, описанию или меткам.
+
+    Args:
+        query: Поисковый запрос
+        limit: Максимальное количество результатов
+    """
+    try:
+        ts = get_task_service()
+        tasks = ts.search_tasks(query)[:limit]
+
+        if not tasks:
+            return f"Задачи по запросу '{query}' не найдены."
+
+        result = f"Результаты поиска по '{query}':\n\n"
+        for task in tasks:
+            result += (
+                f"**{task.id}**: {task.title}\n"
+                f"  Статус: {task.status} | Приоритет: {task.priority}\n"
+            )
+            if task.description:
+                desc_preview = task.description[:100] + "..." if len(task.description) > 100 else task.description
+                result += f"  Описание: {desc_preview}\n"
+            result += "\n"
+
+        return result.strip()
+    except Exception as e:
+        error_msg = f"Ошибка при поиске задач: {e}"
+        log.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def task_recommend(limit: int = 5, assignee: str = None) -> str:
+    """Получить рекомендации по приоритетам задач.
+
+    Показывает, какие задачи лучше всего выполнить сначала,
+    основываясь на приоритете, сроках и других факторах.
+
+    Args:
+        limit: Максимальное количество рекомендаций
+        assignee: Фильтр по исполнителю
+    """
+    try:
+        ts = get_task_service()
+        recommendations = ts.get_priority_recommendations(
+            limit=limit,
+            assignee=assignee
+        )
+
+        if not recommendations:
+            return "Нет задач для рекомендаций."
+
+        result = "Рекомендации по приоритетам:\n\n"
+        for i, rec in enumerate(recommendations, 1):
+            result += (
+                f"{i}. **{rec.task.id}**: {rec.task.title}\n"
+                f"   Приоритет: {rec.task.priority.upper()}\n"
+                f"   Оценка влияния: {rec.estimated_impact}\n"
+                f"   Причина: {rec.reason}\n"
+            )
+            if rec.task.due_date:
+                result += f"   Срок: {rec.task.due_date}\n"
+            result += "\n"
+
+        return result.strip()
+    except Exception as e:
+        error_msg = f"Ошибка при получении рекомендаций: {e}"
+        log.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def task_status() -> str:
+    """Показать общий статус проекта и статистику задач."""
+    try:
+        ts = get_task_service()
+        summary = ts.get_project_status_summary()
+
+        result = (
+            f"## Статус проекта\n\n"
+            f"**Всего задач**: {summary['total_tasks']}\n"
+            f"**Выполнено**: {summary['by_status'].get('done', 0)} ({summary['completion_rate']}%)\n"
+            f"**В работе**: {summary['by_status'].get('in_progress', 0)}\n"
+            f"**К выполнению**: {summary['by_status'].get('todo', 0)}\n"
+            f"**Просрочено**: {summary['overdue']}\n"
+            f"**Без исполнителя**: {summary['unassigned']}\n\n"
+            f"### По приоритетам\n"
+        )
+
+        for priority, count in sorted(summary['by_priority'].items(), key=lambda x: x[1], reverse=True):
+            result += f"- **{priority.upper()}**: {count}\n"
+
+        result += "\n### По типам\n"
+        for task_type, count in sorted(summary['by_type'].items(), key=lambda x: x[1], reverse=True):
+            result += f"- **{task_type}**: {count}\n"
+
+        return result
+    except Exception as e:
+        error_msg = f"Ошибка при получении статуса: {e}"
+        log.error(error_msg)
+        return error_msg
+
+
+@mcp.tool()
+async def task_add_subtask(task_id: str, title: str) -> str:
+    """Добавить подзадачу к задаче.
+
+    Args:
+        task_id: ID родительской задачи
+        title: Название подзадачи
+    """
+    try:
+        ts = get_task_service()
+        subtask = ts.add_subtask(task_id, title)
+        log.info(f"Added subtask to task {task_id}")
+        return f"Подзадача добавлена к задаче {task_id}: {title}"
+    except ValueError as e:
+        return str(e)
+    except Exception as e:
+        error_msg = f"Ошибка при добавлении подзадачи: {e}"
+        log.error(error_msg)
+        return error_msg
 
 
 # --------------------  ЗАПУСК СЕРВЕРА  --------------------

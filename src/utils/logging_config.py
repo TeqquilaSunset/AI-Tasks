@@ -25,13 +25,21 @@ def setup_logging(
     # Determine the output stream
     stream = sys.stderr if output_stream == "stderr" else sys.stdout
 
-    # Configure logging
-    logging.basicConfig(
-        level=level,
-        format="[%(asctime)s] %(levelname)s - %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-        handlers=[logging.StreamHandler(stream)],
-    )
-
+    # Create logger with specific name to avoid global configuration
     logger = logging.getLogger(name)
+    logger.setLevel(level)
+
+    # Remove existing handlers to avoid duplicates
+    if logger.handlers:
+        logger.handlers.clear()
+
+    # Create handler for this specific logger only
+    handler = logging.StreamHandler(stream)
+    handler.setLevel(level)
+    formatter = logging.Formatter("[%(asctime)s] %(levelname)s - %(name)s: %(message)s", datefmt="%H:%M:%S")
+    handler.setFormatter(formatter)
+
+    logger.addHandler(handler)
+    logger.propagate = False  # Don't propagate to root logger
+
     return logger

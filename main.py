@@ -31,7 +31,7 @@ from src.config import (
     SERVER_SCRIPT,
     SYSTEM_PROMPT,
 )
-from src.services import RAGService, HelpService
+from src.services import RAGService, HelpService, TaskService
 from src.utils import setup_logging
 
 load_dotenv()
@@ -158,6 +158,7 @@ class ChatClient:
         temperature: LLM temperature setting
         rag_service: RAG service instance
         help_service: Help service instance
+        task_service: Task service instance
         use_rag: Whether RAG mode is enabled
     """
 
@@ -178,6 +179,7 @@ class ChatClient:
         self.temperature = DEFAULT_TEMPERATURE
         self.rag_service = RAGService()
         self.help_service = HelpService()
+        self.task_service = TaskService()
         self.use_rag = False
 
     async def process_query(self, query: str) -> str:
@@ -199,6 +201,10 @@ class ChatClient:
         # Check for RAG control commands
         if query.lower().startswith("/rag"):
             return await self._handle_rag_command(query)
+
+        # Check for task commands
+        if query.lower().startswith("/task"):
+            return await self._handle_task_command(query)
 
         # Use RAG for regular queries if enabled
         if self.use_rag:
@@ -517,6 +523,453 @@ Provide a brief summary of the project state and any recommendations."""
                 actual_query = f"{parts[1]} {parts[2]}"
                 return await self._process_with_rag(actual_query)
 
+    async def _handle_task_command(self, query: str) -> str:
+        """Handle /task commands for task management with RAG integration."""
+        parts = query.split(" ", 2)
+        subcommand = parts[1].strip() if len(parts) > 1 else ""
+
+        if not subcommand:
+            # Show task status
+            return await self._task_show_status()
+
+        subcommand_lower = subcommand.lower()
+
+        # Handle different subcommands
+        if subcommand_lower in ("list", "ls", "show"):
+            # List tasks with optional filters
+            filters = parts[2].strip() if len(parts) > 2 else ""
+            return await self._task_list(filters)
+
+        elif subcommand_lower in ("create", "new", "add"):
+            # Create task - use LLM to parse task details
+            task_desc = parts[2].strip() if len(parts) > 2 else ""
+            return await self._task_create_with_ai(task_desc)
+
+        elif subcommand_lower in ("recommend", "priority", "what", "suggest"):
+            # Get AI-powered recommendations with RAG
+            return await self._task_recommend_with_rag()
+
+        elif subcommand_lower == "status":
+            # Show project status
+            return await self._task_show_status()
+
+        elif subcommand_lower.startswith("get:"):
+            # Get specific task
+            task_id = subcommand.split(":", 1)[1].strip()
+            return await self._task_get(task_id)
+
+        elif subcommand_lower.startswith("update:"):
+            # Update task - use AI to parse
+            update_info = parts[2].strip() if len(parts) > 2 else ""
+            task_id = subcommand.split(":", 1)[1].strip()
+            return await self._task_update_with_ai(task_id, update_info)
+
+        elif subcommand_lower == "search":
+            # Search tasks
+            search_query = parts[2].strip() if len(parts) > 2 else ""
+            return await self._task_search(search_query)
+
+        else:
+            # Treat as general query about tasks with RAG context
+            return await self._task_query_with_rag(query)
+
+    async def _task_show_status(self) -> str:
+        """Show overall project task status."""
+        try:
+            summary = self.task_service.get_project_status_summary()
+
+            status_text = f"""
+📊 **Статус проекта**
+
+Всего задач: {summary['total_tasks']}
+✅ Выполнено: {summary['by_status'].get('done', 0)} ({summary['completion_rate']}%)
+🔄 В работе: {summary['by_status'].get('in_progress', 0)}
+📋 К выполнению: {summary['by_status'].get('todo', 0)}
+⚠️ Просрочено: {summary['overdue']}
+❌ Без исполнителя: {summary['unassigned']}
+
+**По приоритетам:**
+"""
+
+            for priority, count in sorted(summary['by_priority'].items(), key=lambda x: x[1], reverse=True):
+                emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(priority, "⚪")
+                status_text += f"{emoji} {priority.upper()}: {count}\n"
+
+            return status_text.strip()
+        except Exception as exc:
+            error_msg = f"Error getting task status: {exc}"
+            log.error(error_msg)
+            return error_msg
+
+    async def _task_list(self, filters: str) -> str:
+        """List tasks with optional filters."""
+        try:
+            # Parse filters from natural language
+            status = None
+            priority = None
+            assignee = None
+
+            filters_lower = filters.lower()
+
+            if "high" in filters_lower or "высокий" in filters_lower:
+                priority = "high"
+            elif "critical" in filters_lower or "критичный" in filters_lower:
+                priority = "critical"
+            elif "medium" in filters_lower or "средний" in filters_lower:
+                priority = "medium"
+            elif "low" in filters_lower or "низкий" in filters_lower:
+                priority = "low"
+
+            if "todo" in filters_lower or "к выполнению" in filters_lower:
+                status = "todo"
+            elif "progress" in filters_lower or "работ" in filters_lower:
+                status = "in_progress"
+            elif "done" in filters_lower or "выполнен" in filters_lower:
+                status = "done"
+
+            tasks = self.task_service.get_all_tasks(
+                status=status,
+                priority=priority,
+                assignee=assignee
+            )[:15]
+
+            if not tasks:
+                return "Задачи не найдены."
+
+            result = f"📋 **Задачи** ({len(tasks)} шт.)\n\n"
+            for task in tasks:
+                emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(task.priority, "⚪")
+                status_emoji = {"todo": "📋", "in_progress": "🔄", "done": "✅", "open": "📌"}.get(task.status, "⚪")
+
+                result += f"{status_emoji} **{task.id}**: {task.title}\n"
+                result += f"   {emoji} {task.priority.upper()} | {task.status}\n"
+                if task.assignee:
+                    result += f"   👤 {task.assignee}\n"
+                if task.due_date:
+                    result += f"   📅 {task.due_date[:10]}\n"
+                result += "\n"
+
+            return result.strip()
+        except Exception as exc:
+            error_msg = f"Error listing tasks: {exc}"
+            log.error(error_msg)
+            return error_msg
+
+    async def _task_create_with_ai(self, description: str) -> str:
+        """Use AI to parse task creation request."""
+        if not description:
+            return "Укажите описание задачи. Например: /task создать задачу: исправить баг в авторизации"
+
+        try:
+            # Use AI with RAG context to parse task details
+            context = self.task_service.get_all_tasks_context()
+
+            ai_prompt = f"""
+На основе следующего описания создай задачу в формате JSON. Учитывай контекст проекта.
+
+Контекст проекта:
+{context}
+
+Описание запроса: {description}
+
+Верни ТОЛЬКО JSON в следующем формате:
+{{
+    "title": "краткое название",
+    "description": "полное описание",
+    "priority": "critical/high/medium/low",
+    "type": "feature/bug/enhancement/documentation/optimization/refactoring",
+    "assignee": null или "имя",
+    "labels": ["label1", "label2"],
+    "estimated_hours": число или null,
+    "story_points": число или null
+}}
+"""
+
+            messages = [{"role": "user", "content": ai_prompt}]
+            response = await self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=1024,
+            )
+
+            content = response.choices[0].message.content or ""
+
+            # Try to extract JSON from response
+            import re
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                task_data = json.loads(json_match.group())
+                task = self.task_service.create_task(**task_data)
+
+                return f"""
+✅ **Задача создана!**
+
+📌 **{task.title}**
+ID: {task.id}
+Приоритет: {task.priority.upper()}
+Тип: {task.type}
+Статус: {task.status}
+Оценка: {task.story_points or 'N/A'} SP, {task.estimated_hours or 'N/A'} ч
+
+Используй `/task get:{task.id}` для просмотра деталей.
+"""
+            else:
+                return "Не удалось распарсить задачу из ответа AI. Попробуйте упростить описание."
+
+        except Exception as exc:
+            error_msg = f"Error creating task with AI: {exc}"
+            log.error(error_msg)
+            return f"Ошибка при создании задачи: {exc}"
+
+    async def _task_recommend_with_rag(self) -> str:
+        """Get AI-powered task recommendations with RAG."""
+        try:
+            # Get base recommendations
+            recommendations = self.task_service.get_priority_recommendations(limit=5)
+
+            # Get RAG context for project documentation
+            rag_context = ""
+            try:
+                rag_results = await self.rag_service.search("best practices task prioritization agile development")
+                if rag_results:
+                    rag_context = "\n\nКонтекст из документации проекта:\n" + self.rag_service.format_context(rag_results[:3])
+            except:
+                pass
+
+            # Build AI prompt with recommendations and RAG
+            rec_text = "\n".join([
+                f"{i}. {rec.task.title} [{rec.task.priority}] - {rec.reason}"
+                for i, rec in enumerate(recommendations, 1)
+            ])
+
+            ai_prompt = f"""
+На основе следующих рекомендаций по приоритетам задач и контекста проекта,
+предложи пользователю, какие 3 задачи лучше всего выполнить сначала.
+
+Рекомендации системы:
+{rec_text}
+{rag_context}
+
+Ответь в формате:
+1. **Название задачи** - причина почему она важна
+2. **Название задачи** - причина
+3. **Название задачи** - причина
+
+Затем дай краткую рекомендацию по общим действиям.
+"""
+
+            messages = [{"role": "user", "content": ai_prompt}]
+            response = await self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=0.7,
+                max_tokens=1024,
+            )
+
+            return f"🎯 **Рекомендации по приоритетам**\n\n{response.choices[0].message.content}"
+
+        except Exception as exc:
+            error_msg = f"Error getting recommendations: {exc}"
+            log.error(error_msg)
+            # Fallback to basic recommendations
+            try:
+                recommendations = self.task_service.get_priority_recommendations(limit=3)
+                result = "🎯 **Рекомендации по приоритетам**\n\n"
+                for i, rec in enumerate(recommendations, 1):
+                    result += f"{i}. **{rec.task.title}**\n"
+                    result += f"   Приоритет: {rec.task.priority.upper()}\n"
+                    result += f"   Причина: {rec.reason}\n\n"
+                return result.strip()
+            except:
+                return error_msg
+
+    async def _task_get(self, task_id: str) -> str:
+        """Get detailed task information."""
+        try:
+            task = self.task_service.get_task(task_id)
+            if not task:
+                return f"Задача не найдена: {task_id}"
+
+            context = self.task_service.get_task_context_for_rag(task_id)
+
+            # Format for display
+            emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(task.priority, "⚪")
+            status_emoji = {"todo": "📋", "in_progress": "🔄", "done": "✅", "open": "📌"}.get(task.status, "⚪")
+
+            return f"""
+{status_emoji} {emoji} **{task.title}**
+
+**ID**: {task.id}
+**Статус**: {task.status.upper()}
+**Приоритет**: {task.priority.upper()}
+**Тип**: {task.type}
+**Исполнитель**: {task.assignee or 'Не назначен'}
+**Оценка**: {task.story_points or 'N/A'} SP | {task.estimated_hours or 'N/A'} ч
+**Срок**: {task.due_date or 'Не установлен'}
+
+### Описание
+{task.description}
+
+### Метки
+{', '.join(task.labels) if task.labels else 'Нет'}
+
+### Подзадачи
+{chr(10).join([f"  - [{st['status'].upper()}] {st['title']}" for st in task.subtasks]) if task.subtasks else 'Нет'}
+
+### Комментарии
+{chr(10).join([f"  **{c['author']}** ({c['created_at'][:10]}): {c['content']}" for c in task.comments[-3:]]) if task.comments else 'Нет'}
+
+---
+📅 Создана: {task.created_at[:10]}
+🔄 Обновлена: {task.updated_at[:10]}
+"""
+        except Exception as exc:
+            error_msg = f"Error getting task: {exc}"
+            log.error(error_msg)
+            return error_msg
+
+    async def _task_search(self, query: str) -> str:
+        """Search tasks."""
+        try:
+            if not query:
+                return "Укажите поисковый запрос. Например: /task поиск авторизация"
+
+            tasks = self.task_service.search_tasks(query)[:10]
+
+            if not tasks:
+                return f"Задачи по запросу '{query}' не найдены."
+
+            result = f"🔍 **Результаты поиска**: '{query}'\n\n"
+            for task in tasks:
+                emoji = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢"}.get(task.priority, "⚪")
+                result += f"**{task.id}**: {task.title} {emoji}\n"
+                result += f"   Статус: {task.status} | Приоритет: {task.priority}\n"
+                if task.description:
+                    preview = task.description[:80] + "..." if len(task.description) > 80 else task.description
+                    result += f"   Описание: {preview}\n"
+                result += "\n"
+
+            return result.strip()
+        except Exception as exc:
+            error_msg = f"Error searching tasks: {exc}"
+            log.error(error_msg)
+            return error_msg
+
+    async def _task_update_with_ai(self, task_id: str, update_info: str) -> str:
+        """Use AI to parse and apply task updates."""
+        try:
+            task = self.task_service.get_task(task_id)
+            if not task:
+                return f"Задача не найдена: {task_id}"
+
+            if not update_info:
+                return "Укажите, что нужно обновить. Например: /task update:task_001 изменить приоритет на high"
+
+            # Use AI to parse update
+            ai_prompt = f"""
+Проанализируй запрос на обновление задачи и верни JSON с изменениями.
+
+Текущая задача:
+- ID: {task.id}
+- Название: {task.title}
+- Статус: {task.status}
+- Приоритет: {task.priority}
+- Тип: {task.type}
+- Исполнитель: {task.assignee}
+
+Запрос на изменение: {update_info}
+
+Верни ТОЛЬКО JSON с изменениями (null если поле не меняется):
+{{
+    "status": "new_status или null",
+    "priority": "new_priority или null",
+    "assignee": "new_assignee или null"
+}}
+"""
+
+            messages = [{"role": "user", "content": ai_prompt}]
+            response = await self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=512,
+            )
+
+            content = response.choices[0].message.content or ""
+
+            # Parse and apply changes
+            import re
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                updates = json.loads(json_match.group())
+                changes = []
+
+                if updates.get("status"):
+                    self.task_service.update_task_status(task_id, updates["status"])
+                    changes.append(f"статус → {updates['status']}")
+
+                if updates.get("priority"):
+                    self.task_service.update_task_priority(task_id, updates["priority"])
+                    changes.append(f"приоритет → {updates['priority']}")
+
+                if updates.get("assignee"):
+                    self.task_service.assign_task(task_id, updates["assignee"])
+                    changes.append(f"исполнитель → {updates['assignee']}")
+
+                if changes:
+                    return f"✅ Задача {task_id} обновлена:\n" + "\n".join([f"  • {ch}" for ch in changes])
+                else:
+                    return "Изменения не применены (не удалось распознать запрос)."
+            else:
+                return "Не удалось распарсить запрос на обновление."
+
+        except Exception as exc:
+            error_msg = f"Error updating task: {exc}"
+            log.error(error_msg)
+            return f"Ошибка при обновлении задачи: {exc}"
+
+    async def _task_query_with_rag(self, query: str) -> str:
+        """Process general task query with RAG context."""
+        try:
+            # Get task context
+            task_context = self.task_service.get_all_tasks_context()
+
+            # Get RAG context if available
+            rag_context = ""
+            try:
+                rag_results = await self.rag_service.search(query)
+                if rag_results:
+                    rag_context = "\n\n📚 Контекст из документации:\n" + self.rag_service.format_context(rag_results[:2])
+            except:
+                pass
+
+            # Build AI prompt
+            ai_prompt = f"""
+Вопрос о задачах проекта: {query}
+
+{task_context}
+{rag_context}
+
+Ответь на вопрос пользователя, используя информацию о задачах.
+Если в контексте RAG есть полезная информация, используй её.
+"""
+
+            messages = self.conversation + [{"role": "user", "content": ai_prompt}]
+            response = await self.openai_client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=2048,
+            )
+
+            return response.choices[0].message.content or ""
+
+        except Exception as exc:
+            error_msg = f"Error processing task query: {exc}"
+            log.error(error_msg)
+            return f"Ошибка: {exc}"
+
     async def _process_with_rag(self, query: str) -> str:
         """Process query using RAG."""
         try:
@@ -766,6 +1219,9 @@ async def interactive_chat(client: ChatClient) -> None:
     )
     print(
         "Help commands: /help, /help <question>, /help style, /help api, /help structure, /help git"
+    )
+    print(
+        "Task commands: /task (status), /task list [filters], /task create <desc>, /task recommend, /task get:<id>"
     )
     print("=" * 60)
 
